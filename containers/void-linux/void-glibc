@@ -1,0 +1,35 @@
+FROM ghcr.io/void-linux/void-glibc-full:latest
+
+#RUN mkdir /opt/workdir
+
+RUN xbps-install -Syu
+RUN xbps-install -y \
+	alsa-lib-devel \
+	atk-devel \
+	clang \
+	cmake \
+	gcc \
+	gdk-pixbuf-devel \
+	git \
+	gtk+3-devel \
+	mold \
+	openssl-devel \
+	pango-devel \
+	pkg-config \
+	rustup
+
+#RUN useradd -m workuser
+#RUN chown -R workuser:workuser /opt/workdir 
+#RUN chmod -R +rw /opt/workdir
+
+#USER workuser
+#WORKDIR /home/workuser
+WORKDIR /root
+RUN rustup-init -y
+RUN ./.cargo/bin/rustup default nightly
+
+WORKDIR /opt/workdir
+# Currently Cargo fails to clone certain repositories due to an SSL error,
+# as such the CARGO_HTTP_CHECK_REVOKE variable is set to false. This is
+# less safe, and should be fixed.
+CMD $HOME/.cargo/bin/cargo build --release
