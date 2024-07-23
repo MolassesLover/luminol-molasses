@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -15,71 +15,58 @@
 // You should have received a copy of the GNU General Public License
 // along with Luminol.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::sync::Arc;
+use color_eyre::eyre::Context;
 
-use crate::{quad::Quad, sprite::Sprite, tiles::Atlas, viewport::Viewport, GraphicsState};
+use crate::{Atlas, GraphicsState, Quad, Renderable, Sprite, Transform, Viewport};
 
 pub struct Event {
-    sprite: Arc<Sprite>,
-    viewport: Arc<Viewport>,
+    pub sprite: Sprite,
     pub sprite_size: egui::Vec2,
-}
-
-struct Callback {
-    sprite: Arc<Sprite>,
-    graphics_state: Arc<GraphicsState>,
-}
-
-//? SAFETY:
-//? wgpu resources are not Send + Sync on wasm, but egui_wgpu::CallbackTrait requires Send + Sync (because egui::Context is Send + Sync)
-//? as long as this callback does not leave the thread it was created on on wasm (which it shouldn't be) these are ok.
-#[allow(unsafe_code)]
-unsafe impl Send for Callback {}
-#[allow(unsafe_code)]
-unsafe impl Sync for Callback {}
-
-impl luminol_egui_wgpu::CallbackTrait for Callback {
-    fn paint<'a>(
-        &'a self,
-        _info: egui::PaintCallbackInfo,
-        render_pass: &mut wgpu::RenderPass<'a>,
-        _callback_resources: &'a luminol_egui_wgpu::CallbackResources,
-    ) {
-        self.sprite.draw(&self.graphics_state, render_pass);
-    }
 }
 
 impl Event {
     // code smell, fix
-    pub fn new(
+    pub fn new_map(
         graphics_state: &GraphicsState,
         filesystem: &impl luminol_filesystem::FileSystem,
+        viewport: &Viewport,
         event: &luminol_data::rpg::Event,
         atlas: &Atlas,
-    ) -> anyhow::Result<Option<Self>> {
+    ) -> color_eyre::Result<Option<Self>> {
         let Some(page) = event.pages.first() else {
-            anyhow::bail!("event does not have first page");
+            color_eyre::eyre::bail!("event does not have first page");
         };
 
+        let mut is_placeholder = false;
         let texture = if let Some(ref filename) = page.graphic.character_name {
-            graphics_state.texture_loader.load_now_dir(
-                filesystem,
-                "Graphics/Characters",
-                filename,
-            )?
+            let texture = graphics_state
+                .texture_loader
+                .load_now_dir(filesystem, "Graphics/Characters", filename)
+                .wrap_err_with(|| format!("Error loading event character graphic {filename:?}"));
+            match texture {
+                Ok(t) => t,
+                Err(e) => {
+                    graphics_state.send_texture_error(e);
+                    is_placeholder = true;
+                    graphics_state.texture_loader.placeholder_texture()
+                }
+            }
         } else if page.graphic.tile_id.is_some() {
             atlas.atlas_texture.clone()
         } else {
             return Ok(None);
         };
 
-        let (quads, viewport, sprite_size) = if let Some(id) = page.graphic.tile_id {
+        let (quad, sprite_size) = if let Some(id) = page.graphic.tile_id {
             // Why does this have to be + 1?
             let quad = atlas.calc_quad((id + 1) as i16);
 
-            let viewport = Arc::new(Viewport::new(graphics_state, 32., 32.));
+            (quad, egui::vec2(32., 32.))
+        } else if is_placeholder {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(32., 32.0));
+            let quad = Quad::new(rect, rect);
 
-            (quad, viewport, egui::vec2(32., 32.))
+            (quad, egui::vec2(32., 32.))
         } else {
             let cw = texture.width() as f32 / 4.;
             let ch = texture.height() as f32 / 4.;
@@ -99,50 +86,129 @@ impl Event {
                 ),
                 egui::vec2(cw - 0.02, ch - 0.02),
             );
-            let quad = Quad::new(pos, tex_coords, 0.0);
+            let quad = Quad::new(pos, tex_coords);
 
-            let viewport = Arc::new(Viewport::new(graphics_state, cw, ch));
-
-            (quad, viewport, egui::vec2(cw, ch))
+            (quad, egui::vec2(cw, ch))
         };
 
-        let sprite = Arc::new(Sprite::new(
+        let x = event.x as f32 * 32. + (32. - sprite_size.x) / 2.;
+        let y = event.y as f32 * 32. + (32. - sprite_size.y);
+        let transform = Transform::new_position(graphics_state, glam::vec2(x, y));
+
+        let sprite = Sprite::new(
             graphics_state,
-            viewport.clone(),
-            quads,
-            texture,
-            page.graphic.blend_type,
+            quad,
             page.graphic.character_hue,
             page.graphic.opacity,
-        ));
+            page.graphic.blend_type,
+            &texture,
+            viewport,
+            transform,
+        );
 
         Ok(Some(Self {
             sprite,
-            viewport,
             sprite_size,
         }))
+    }
+
+    pub fn new_standalone(
+        graphics_state: &GraphicsState,
+        filesystem: &impl luminol_filesystem::FileSystem,
+        viewport: &Viewport,
+        graphic: &luminol_data::rpg::Graphic,
+        atlas: &Atlas,
+    ) -> color_eyre::Result<Option<Self>> {
+        let mut is_placeholder = false;
+        let texture = if let Some(ref filename) = graphic.character_name {
+            let texture = graphics_state
+                .texture_loader
+                .load_now_dir(filesystem, "Graphics/Characters", filename)
+                .wrap_err_with(|| format!("Error loading event character graphic {filename:?}"));
+            match texture {
+                Ok(t) => t,
+                Err(e) => {
+                    graphics_state.send_texture_error(e);
+                    is_placeholder = true;
+                    graphics_state.texture_loader.placeholder_texture()
+                }
+            }
+        } else if graphic.tile_id.is_some() {
+            atlas.atlas_texture.clone()
+        } else {
+            return Ok(None);
+        };
+
+        let (quad, sprite_size) = if let Some(id) = graphic.tile_id {
+            // Why does this have to be + 1?
+            let quad = atlas.calc_quad((id + 1) as i16);
+
+            (quad, egui::vec2(32., 32.))
+        } else if is_placeholder {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(32., 32.0));
+            let quad = Quad::new(rect, rect);
+
+            (quad, egui::vec2(32., 32.))
+        } else {
+            let cw = texture.width() as f32 / 4.;
+            let ch = texture.height() as f32 / 4.;
+            let pos = egui::Rect::from_min_size(
+                egui::pos2(
+                    0., //(event.x as f32 * 32.) + (16. - (cw / 2.)),
+                    0., //(event.y as f32 * 32.) + (32. - ch),
+                ),
+                egui::vec2(cw, ch),
+            );
+
+            // Reduced by 0.01 px on all sides to reduce texture bleeding
+            let tex_coords = egui::Rect::from_min_size(
+                egui::pos2(
+                    graphic.pattern as f32 * cw + 0.01,
+                    (graphic.direction as f32 - 2.) / 2. * ch + 0.01,
+                ),
+                egui::vec2(cw - 0.02, ch - 0.02),
+            );
+            let quad = Quad::new(pos, tex_coords);
+
+            (quad, egui::vec2(cw, ch))
+        };
+
+        let transform = Transform::unit(graphics_state);
+
+        let sprite = Sprite::new(
+            graphics_state,
+            quad,
+            graphic.character_hue,
+            graphic.opacity,
+            graphic.blend_type,
+            &texture,
+            viewport,
+            transform,
+        );
+
+        Ok(Some(Self {
+            sprite,
+            sprite_size,
+        }))
+    }
+
+    pub fn set_position(&mut self, render_state: &luminol_egui_wgpu::RenderState, x: i32, y: i32) {
+        let x = x as f32 * 32. + (32. - self.sprite_size.x) / 2.;
+        let y = y as f32 * 32. + (32. - self.sprite_size.y);
+        self.sprite
+            .transform
+            .set_position(render_state, glam::vec2(x, y));
     }
 
     pub fn sprite(&self) -> &Sprite {
         &self.sprite
     }
+}
 
-    pub fn set_proj(&self, render_state: &luminol_egui_wgpu::RenderState, proj: glam::Mat4) {
-        self.viewport.set_proj(render_state, proj);
-    }
+impl Renderable for Event {
+    type Prepared = <Sprite as Renderable>::Prepared;
 
-    pub fn paint(
-        &self,
-        graphics_state: Arc<GraphicsState>,
-        painter: &egui::Painter,
-        rect: egui::Rect,
-    ) {
-        painter.add(luminol_egui_wgpu::Callback::new_paint_callback(
-            rect,
-            Callback {
-                sprite: self.sprite.clone(),
-                graphics_state,
-            },
-        ));
+    fn prepare(&mut self, graphics_state: &std::sync::Arc<GraphicsState>) -> Self::Prepared {
+        self.sprite.prepare(graphics_state)
     }
 }

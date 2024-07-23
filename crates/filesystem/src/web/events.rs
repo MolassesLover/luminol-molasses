@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -16,11 +16,11 @@
 // along with Luminol.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::util::{
-    generate_key, get_subdir, get_subdir_create, get_tmp_dir, handle_event, idb, to_future,
+    generate_key, get_subdir, get_subdir_create, get_tmp_dir, handle_event, to_future,
 };
 use super::FileSystemCommand;
 use crate::{DirEntry, Error, Metadata, OpenFlags};
-use indexed_db_futures::prelude::*;
+use luminol_web::IdbQuerySource;
 use std::io::ErrorKind::{InvalidInput, PermissionDenied};
 use wasm_bindgen::prelude::*;
 
@@ -81,7 +81,16 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                                     is_file: true,
                                     size: blob.size() as u64,
                                 })
-                                .map_err(|_| Error::IoError(PermissionDenied.into()))
+                                .map_err(|e| {
+                                    Error::IoError(std::io::Error::new(
+                                        PermissionDenied,
+                                        format!(
+                                            "Failed to get read handle to file: {}",
+                                            e.to_string()
+                                        ),
+                                    ))
+                                    .into()
+                                })
                         } else if to_future::<web_sys::FileSystemDirectoryHandle>(
                             subdir.get_directory_handle(name),
                         )
@@ -95,7 +104,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                             })
                         } else {
                             // If the path is neither a file nor a directory
-                            Err(Error::NotExist)
+                            Err(Error::NotExist.into())
                         }
                     })
                     .await;
@@ -112,28 +121,29 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
 
                 FileSystemCommand::DirFromIdb(idb_key, tx) => {
                     handle_event(tx, async {
-                        let dir = idb(IdbTransactionMode::Readonly, |store| {
+                        let dir = luminol_web::idb("filesystem.dir_handles", luminol_web::IdbTransactionMode::Readonly, |store| {
                             store.get_owned(&idb_key)
                         })
                         .await
-                        .ok()?
+                        .map_err(|e| color_eyre::eyre::eyre!(format!("Failed to restore directory handle from IndexedDB: {}", e.to_string())))?
                         .await
-                        .ok()
-                        .flatten()?;
+                        .map_err(|e| color_eyre::eyre::eyre!(format!("Failed to restore directory handle from IndexedDB: {}", e.to_string())))?
+                        .ok_or(color_eyre::eyre::eyre!("Failed to restore directory handle from IndexedDB: No directory handle found for the given IndexedDB key"))?;
                         let dir = dir.unchecked_into::<web_sys::FileSystemDirectoryHandle>();
                         let key =
                             luminol_web::bindings::request_permission(&dir)
                                 .await
+                                .map_err(|e| color_eyre::eyre::eyre!("Failed to request permission for directory handle restored from IndexedDB: {}", e.to_string()))?
                                 .then(|| {
                                     let name = dir.name();
                                     (dirs.insert(dir), name)
-                                })?;
-                        idb(IdbTransactionMode::Readwrite, |store| {
+                                }).ok_or(color_eyre::eyre::eyre!("Failed to request permission for directory handle restored from IndexedDB"))?;
+                        luminol_web::idb("filesystem.dir_handles", luminol_web::IdbTransactionMode::Readwrite, |store| {
                             store.delete_owned(&idb_key)
                         })
                         .await
-                        .ok()?;
-                        Some(key)
+                        .map_err(|e| color_eyre::eyre::eyre!(format!("Failed to remove directory handle from IndexedDB: {}", e.to_string())))?;
+                        Ok(key)
                     })
                     .await;
                 }
@@ -141,9 +151,11 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                 FileSystemCommand::DirToIdb(key, idb_key, tx) => {
                     handle_event(tx, async {
                         let dir = dirs.get(key).unwrap();
-                        idb(IdbTransactionMode::Readwrite, |store| {
-                            store.put_key_val_owned(idb_key, dir)
-                        })
+                        luminol_web::idb(
+                            "filesystem.dir_handles",
+                            luminol_web::IdbTransactionMode::Readwrite,
+                            |store| store.put_key_val_owned(idb_key, dir),
+                        )
                         .await
                         .is_ok()
                     })
@@ -167,7 +179,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         let mut iter = path.iter();
                         let filename = iter
                             .next_back()
-                            .ok_or(Error::IoError(PermissionDenied.into()))?;
+                            .ok_or(Error::IoError(std::io::Error::new(PermissionDenied, "Tried to open a file but the given path corresponded to a directory")))?;
                         let subdir = get_subdir(dirs.get(key).unwrap(), &mut iter)
                             .await
                             .ok_or(Error::NotExist)?;
@@ -226,7 +238,8 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                             if (flags.contains(OpenFlags::Write) && handle.write_handle.is_none())
                                 || !close_result
                             {
-                                Err(Error::IoError(std::io::ErrorKind::PermissionDenied.into()))
+                                Err(Error::IoError(std::io::Error::new(PermissionDenied, "Failed to obtain write permissions for file"))
+                                    .into())
                             } else {
                                 Ok(files.insert(handle))
                             }
@@ -237,10 +250,10 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         .is_ok()
                         {
                             // If the path is a directory
-                            Err(Error::IoError(PermissionDenied.into()))
+                            Err(std::io::Error::new(PermissionDenied, "Tried to open a file but the given path corresponded to a directory").into())
                         } else {
                             // If the path is neither a file nor a directory
-                            Err(Error::NotExist)
+                            Err(Error::NotExist.into())
                         }
                     })
                     .await;
@@ -273,7 +286,10 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         let mut iter = path.iter();
                         get_subdir_create(dirs.get(key).unwrap(), &mut iter)
                             .await
-                            .ok_or(Error::IoError(PermissionDenied.into()))?;
+                            .ok_or(Error::IoError(std::io::Error::new(
+                                PermissionDenied,
+                                "Failed to create directory",
+                            )))?;
                         Ok(())
                     })
                     .await;
@@ -284,7 +300,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         let mut iter = path.iter();
                         let dirname = iter
                             .next_back()
-                            .ok_or(Error::IoError(PermissionDenied.into()))?;
+                            .ok_or(Error::IoError(std::io::Error::new(PermissionDenied, "Failed to remove directory")))?;
                         let subdir = get_subdir(dirs.get(key).unwrap(), &mut iter)
                             .await
                             .ok_or(Error::NotExist)?;
@@ -296,7 +312,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         .is_ok()
                         {
                             // If the path is a file
-                            Err(Error::IoError(PermissionDenied.into()))
+                            Err(std::io::Error::new(PermissionDenied, "Tried to remove a directory but the given path corresponded to a file").into())
                         } else if to_future::<web_sys::FileSystemDirectoryHandle>(
                             subdir.get_directory_handle(dirname),
                         )
@@ -311,10 +327,10 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                             )
                             .await
                             .map(|_| ())
-                            .map_err(|_| Error::IoError(PermissionDenied.into()))
+                            .map_err(|e| std::io::Error::new(PermissionDenied, format!("Failed to remove directory: {}", e.to_string())).into())
                         } else {
                             // If the path is neither a file nor a directory
-                            Err(Error::NotExist)
+                            Err(Error::NotExist.into())
                         }
                     })
                     .await;
@@ -325,7 +341,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         let mut iter = path.iter();
                         let filename = iter
                             .next_back()
-                            .ok_or(Error::IoError(PermissionDenied.into()))?;
+                            .ok_or(std::io::Error::new(PermissionDenied, "Tried to remove a file but the given path corresponded to a directory"))?;
                         let subdir = get_subdir(dirs.get(key).unwrap(), &mut iter)
                             .await
                             .ok_or(Error::NotExist)?;
@@ -340,7 +356,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                             to_future::<JsValue>(subdir.remove_entry(filename))
                                 .await
                                 .map(|_| ())
-                                .map_err(|_| Error::IoError(PermissionDenied.into()))
+                                .map_err(|e| std::io::Error::new(PermissionDenied, format!("Failed to remove file: {}", e.to_string())).into())
                         } else if to_future::<web_sys::FileSystemDirectoryHandle>(
                             subdir.get_directory_handle(filename),
                         )
@@ -348,10 +364,10 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         .is_ok()
                         {
                             // If the path is a directory
-                            Err(Error::IoError(PermissionDenied.into()))
+                            Err(std::io::Error::new(PermissionDenied, "Tried to remove a file but the given path corresponded to a directory").into())
                         } else {
                             // If the path is neither a file nor a directory
-                            Err(Error::NotExist)
+                            Err(Error::NotExist.into())
                         }
                     })
                     .await;
@@ -368,9 +384,15 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         let mut vec = Vec::new();
                         loop {
                             let Ok(entry) = to_future::<js_sys::IteratorNext>(
-                                entry_iter
-                                    .next()
-                                    .map_err(|_| Error::IoError(PermissionDenied.into()))?,
+                                entry_iter.next().map_err(|e| {
+                                    std::io::Error::new(
+                                        PermissionDenied,
+                                        format!(
+                                            "Failed to read directory contents: {}",
+                                            e.unchecked_into::<js_sys::Error>().to_string()
+                                        ),
+                                    )
+                                })?,
                             )
                             .await
                             else {
@@ -433,7 +455,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
 
                 FileSystemCommand::FileCreateTemp(tx) => {
                     handle_event(tx, async {
-                        let tmp_dir = get_tmp_dir(&storage).await.ok_or(PermissionDenied)?;
+                        let tmp_dir = get_tmp_dir(&storage).await?;
 
                         let filename = generate_key();
 
@@ -443,11 +465,25 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                             tmp_dir.get_file_handle_with_options(&filename, &options),
                         )
                         .await
-                        .map_err(|_| PermissionDenied)?;
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                PermissionDenied,
+                                format!("Failed to create temporary file: {}", e.to_string()),
+                            )
+                        })?;
 
-                        let write_handle = to_future(file_handle.create_writable())
-                            .await
-                            .map_err(|_| PermissionDenied)?;
+                        let write_handle =
+                            to_future(file_handle.create_writable())
+                                .await
+                                .map_err(|e| {
+                                    std::io::Error::new(
+                                        PermissionDenied,
+                                        format!(
+                                        "Failed to obtain write permissions for temporary file: {}",
+                                        e.to_string()
+                                    ),
+                                    )
+                                })?;
 
                         Ok((
                             files.insert(FileHandle {
@@ -465,14 +501,34 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                 FileSystemCommand::FileSetLength(key, new_size, tx) => {
                     handle_event(tx, async {
                         let file = files.get_mut(key).unwrap();
-                        let write_handle = file.write_handle.as_ref().ok_or(PermissionDenied)?;
+                        let write_handle =
+                            file.write_handle.as_ref().ok_or(std::io::Error::new(
+                                PermissionDenied,
+                                "Attempted to write to file with no write permissions",
+                            ))?;
                         to_future::<JsValue>(
                             write_handle
                                 .truncate_with_f64(new_size as f64)
-                                .map_err(|_| PermissionDenied)?,
+                                .map_err(|e| {
+                                    std::io::Error::new(
+                                        PermissionDenied,
+                                        format!(
+                                            "Failed to set file length: {}",
+                                            e.unchecked_into::<js_sys::Error>().to_string()
+                                        ),
+                                    )
+                                })?,
                         )
                         .await
-                        .map_err(|_| PermissionDenied)?;
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                PermissionDenied,
+                                format!(
+                                    "Failed to set file length: {}",
+                                    e.unchecked_into::<js_sys::Error>().to_string()
+                                ),
+                            )
+                        })?;
                         Ok(())
                     })
                     .await;
@@ -502,16 +558,43 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                 FileSystemCommand::FileSave(key, filename, tx) => {
                     handle_event(tx, async {
                         let file = files.get(key).unwrap();
-                        let file_handle = file.read_allowed.then_some(&file.file_handle)?;
+                        let file_handle = file.read_allowed.then_some(&file.file_handle).ok_or(
+                            std::io::Error::new(
+                                PermissionDenied,
+                                "Attempted to read from file with no read permissions",
+                            ),
+                        )?;
 
                         let blob = to_future::<web_sys::File>(file_handle.get_file())
                             .await
-                            .ok()?;
-                        let url = web_sys::Url::create_object_url_with_blob(&blob).ok()?;
+                            .map_err(|e| {
+                                Error::IoError(std::io::Error::new(
+                                    PermissionDenied,
+                                    format!("Failed to get read handle to file: {}", e.to_string()),
+                                ))
+                            })?;
+                        let url =
+                            web_sys::Url::create_object_url_with_blob(&blob).map_err(|e| {
+                                Error::IoError(std::io::Error::new(
+                                    PermissionDenied,
+                                    format!(
+                                        "Failed to create object URL from blob: {}",
+                                        e.unchecked_into::<js_sys::Error>().to_string()
+                                    ),
+                                ))
+                            })?;
 
                         let anchor = document
                             .create_element("a")
-                            .ok()?
+                            .map_err(|e| {
+                                Error::IoError(std::io::Error::new(
+                                    PermissionDenied,
+                                    format!(
+                                        "Failed to create anchor element for downloading files: {}",
+                                        e.unchecked_into::<js_sys::Error>().to_string()
+                                    ),
+                                ))
+                            })?
                             .unchecked_into::<web_sys::HtmlAnchorElement>();
                         anchor.set_href(&url);
                         anchor.set_download(&filename);
@@ -519,7 +602,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         anchor.remove();
                         let _ = web_sys::Url::revoke_object_url(&url);
 
-                        Some(())
+                        Ok(())
                     })
                     .await;
                 }
@@ -535,18 +618,18 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         } else {
                             None
                         })
-                        .ok_or(PermissionDenied)?;
+                        .ok_or(std::io::Error::new(PermissionDenied, "Attempted to read from file with no read permissions"))?;
 
                         let blob = read_handle
                             .slice_with_f64_and_f64(
                                 file.offset as f64,
                                 (file.offset + max_length) as f64,
                             )
-                            .map_err(|_| PermissionDenied)?;
+                            .map_err(|e| std::io::Error::new(PermissionDenied, format!("Failed to read from file: {}", e.unchecked_into::<js_sys::Error>().to_string())))?;
 
                         let buffer = to_future::<js_sys::ArrayBuffer>(blob.array_buffer())
                             .await
-                            .map_err(|_| PermissionDenied)?;
+                            .map_err(|e| std::io::Error::new(PermissionDenied, format!("Failed to convert file contents into array buffer while reading file: {}", e.unchecked_into::<js_sys::Error>().to_string())))?;
 
                         let u8_array = js_sys::Uint8Array::new(&buffer);
                         let vec = u8_array.to_vec();
@@ -559,32 +642,65 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                 FileSystemCommand::FileWrite(key, vec, tx) => {
                     handle_event(tx, async {
                         let file = files.get_mut(key).unwrap();
-                        let write_handle = file.write_handle.as_ref().ok_or(PermissionDenied)?;
+                        let write_handle =
+                            file.write_handle.as_ref().ok_or(std::io::Error::new(
+                                PermissionDenied,
+                                "Attempted to write to file with no write permissions",
+                            ))?;
 
                         // We can't use `write_handle.write_with_u8_array()` when shared memory is enabled
                         let u8_array =
                             js_sys::Uint8Array::new(&JsValue::from_f64(vec.len() as f64));
                         u8_array.copy_from(&vec[..]);
-                        if to_future::<JsValue>(
+                        to_future::<JsValue>(
                             write_handle
                                 .seek_with_f64(file.offset as f64)
-                                .map_err(|_| PermissionDenied)?,
+                                .map_err(|e| {
+                                    std::io::Error::new(
+                                        PermissionDenied,
+                                        format!(
+                                            "Failed to seek file handle: {}",
+                                            e.unchecked_into::<js_sys::Error>().to_string()
+                                        ),
+                                    )
+                                })?,
                         )
                         .await
-                        .is_ok()
-                            && to_future::<JsValue>(
-                                write_handle
-                                    .write_with_buffer_source(&u8_array)
-                                    .map_err(|_| PermissionDenied)?,
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                PermissionDenied,
+                                format!(
+                                    "Failed to seek file handle: {}",
+                                    e.unchecked_into::<js_sys::Error>().to_string()
+                                ),
                             )
-                            .await
-                            .is_ok()
-                        {
-                            file.offset += vec.len();
-                            Ok(())
-                        } else {
-                            Err(PermissionDenied.into())
-                        }
+                        })?;
+                        to_future::<JsValue>(
+                            write_handle
+                                .write_with_buffer_source(&u8_array)
+                                .map_err(|e| {
+                                    std::io::Error::new(
+                                        PermissionDenied,
+                                        format!(
+                                            "Failed to write to file: {}",
+                                            e.unchecked_into::<js_sys::Error>().to_string()
+                                        ),
+                                    )
+                                })?,
+                        )
+                        .await
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                PermissionDenied,
+                                format!(
+                                    "Failed to write to file: {}",
+                                    e.unchecked_into::<js_sys::Error>().to_string()
+                                ),
+                            )
+                        })?;
+
+                        file.offset += vec.len();
+                        Ok(())
                     })
                     .await;
                 }
@@ -594,25 +710,44 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         let file = files.get_mut(key).unwrap();
 
                         // Closing and reopening the handle is the only way to flush
-                        if file.write_handle.is_none()
-                            || to_future::<JsValue>(
-                                file.write_handle.as_ref().ok_or(PermissionDenied)?.close(),
-                            )
-                            .await
-                            .is_err()
-                        {
-                            return Err(PermissionDenied.into());
+                        if file.write_handle.is_none() {
+                            return Err(std::io::Error::new(
+                                PermissionDenied,
+                                "Attempted to write to file with no write permissions",
+                            ));
                         }
+                        to_future::<JsValue>(
+                            file.write_handle
+                                .as_ref()
+                                .ok_or(std::io::Error::new(
+                                    PermissionDenied,
+                                    "Attempted to write to file with no write permissions",
+                                ))?
+                                .close(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                PermissionDenied,
+                                format!("Failed to flush file: {}", e.to_string()),
+                            )
+                        })?;
                         let mut options = web_sys::FileSystemCreateWritableOptions::new();
                         options.keep_existing_data(true);
-                        if let Ok(write_handle) =
-                            to_future(file.file_handle.create_writable_with_options(&options)).await
-                        {
-                            file.write_handle = Some(write_handle);
-                            Ok(())
-                        } else {
-                            Err(PermissionDenied.into())
-                        }
+                        let write_handle =
+                            to_future(file.file_handle.create_writable_with_options(&options))
+                                .await
+                                .map_err(|e| {
+                                    std::io::Error::new(
+                                        PermissionDenied,
+                                        format!(
+                                    "Failed to reopen write handle for file after flushing: {}",
+                                    e.to_string()
+                                ),
+                                    )
+                                })?;
+                        file.write_handle = Some(write_handle);
+                        Ok(())
                     })
                     .await;
                 }
@@ -627,7 +762,10 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         } else {
                             None
                         })
-                        .ok_or(PermissionDenied)?;
+                        .ok_or(std::io::Error::new(
+                            PermissionDenied,
+                            "Attempted to read from file with no read permissions",
+                        ))?;
 
                         let size = read_handle.size();
                         let new_offset = match seek_from {
@@ -639,7 +777,10 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                             file.offset = new_offset as usize;
                             Ok(new_offset as u64)
                         } else {
-                            Err(InvalidInput.into())
+                            Err(std::io::Error::new(
+                                InvalidInput,
+                                "Tried to seek to negative offset in file",
+                            ))
                         }
                     })
                     .await;
@@ -651,7 +792,12 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                         to_future::<web_sys::File>(file.file_handle.get_file())
                             .await
                             .map(|file| file.size() as u64)
-                            .map_err(|_| PermissionDenied.into())
+                            .map_err(|e| {
+                                std::io::Error::new(
+                                    PermissionDenied,
+                                    format!("Failed to get file size: {}", e.to_string()),
+                                )
+                            })
                     })
                     .await;
                 }
@@ -667,7 +813,7 @@ pub fn setup_main_thread_hooks(main_channels: super::MainChannels) {
                             }
 
                             if let Some(temp_file_name) = temp_file_name {
-                                if let Some(tmp_dir) = get_tmp_dir(&storage).await {
+                                if let Ok(tmp_dir) = get_tmp_dir(&storage).await {
                                     let _ =
                                         to_future::<JsValue>(tmp_dir.remove_entry(&temp_file_name))
                                             .await;

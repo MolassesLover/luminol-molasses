@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{epi, App};
 
-use super::{events, AppRunner, PanicHandler};
+use super::{events, text_agent::TextAgent, AppRunner, PanicHandler};
 
 /// This is how `eframe` runs your wepp application
 ///
@@ -24,34 +24,68 @@ pub struct WebRunner {
     /// They have to be in a separate `Rc` so that we don't need to pass them to
     /// the panic handler, since they aren't `Send`.
     events_to_unsubscribe: Rc<RefCell<Vec<EventToUnsubscribe>>>,
+
+    /// Current animation frame in flight.
+    frame: Rc<RefCell<Option<AnimationFrameRequest>>>,
+
+    resize_observer: Rc<RefCell<Option<ResizeObserverContext>>>,
 }
 
 impl WebRunner {
     /// Will install a panic handler that will catch and log any panics
     #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
+    pub fn new(panic_tx: std::sync::Arc<parking_lot::Mutex<Option<oneshot::Sender<()>>>>) -> Self {
         #[cfg(not(web_sys_unstable_apis))]
         log::warn!(
             "eframe compiled without RUSTFLAGS='--cfg=web_sys_unstable_apis'. Copying text won't work."
         );
 
-        let panic_handler = PanicHandler::install();
+        let panic_handler = PanicHandler::install(panic_tx);
 
         Self {
             panic_handler,
             runner: Rc::new(RefCell::new(None)),
             events_to_unsubscribe: Rc::new(RefCell::new(Default::default())),
+            frame: Default::default(),
+            resize_observer: Default::default(),
         }
     }
 
     /// Set up the event listeners on the main thread in order to do things like respond to
     /// mouse events and resize the canvas to fill the screen.
-    pub fn setup_main_thread_hooks(state: super::MainState) -> Result<(), JsValue> {
+    pub fn setup_main_thread_hooks(
+        state: super::MainState,
+    ) -> Result<std::sync::Arc<parking_lot::Mutex<Option<oneshot::Sender<()>>>>, JsValue> {
+        if state.text_agent.set(TextAgent::attach(&state)?).is_err() {
+            panic!("failed to set text agent");
+        }
+
+        let (panic_tx, panic_rx) = oneshot::channel();
+
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = panic_rx.await;
+            super::EVENTS_TO_UNSUBSCRIBE.with_borrow_mut(|events| {
+                for event in events.drain(..) {
+                    if let Err(e) = event.unsubscribe() {
+                        log::warn!(
+                            "Failed to unsubscribe from event: {}",
+                            super::string_from_js_value(&e),
+                        );
+                    }
+                }
+            });
+        });
+
+        events::install_event_handlers(&state)?;
+        events::install_color_scheme_change_event(&state)?;
+
         {
-            events::install_canvas_events(&state)?;
-            events::install_document_events(&state)?;
-            events::install_window_events(&state)?;
-            super::text_agent::install_text_agent(&state)?;
+            // Make sure the canvas can be given focus.
+            // https://developer.mozilla.org/en-US/docs/Web/HTML/Global_attributes/tabindex
+            state.canvas.set_tab_index(0);
+
+            // Don't outline the canvas when it has focus:
+            state.canvas.style().set_property("outline", "none")?;
         }
 
         wasm_bindgen_futures::spawn_local(async move {
@@ -64,42 +98,29 @@ impl WebRunner {
                 };
 
                 match command {
-                    super::WebRunnerOutput::PlatformOutput(
-                        output,
-                        screen_reader_enabled,
-                        wants_keyboard_input,
-                    ) => {
-                        AppRunner::handle_platform_output(
-                            &state,
-                            output,
-                            screen_reader_enabled,
-                            wants_keyboard_input,
-                        );
+                    super::WebRunnerOutput::PlatformOutput(output, screen_reader_enabled) => {
+                        AppRunner::handle_platform_output(&state, output, screen_reader_enabled);
                     }
 
                     super::WebRunnerOutput::StorageGet(key, oneshot_tx) => {
-                        let _ = oneshot_tx.send(super::storage::local_storage_get(&key));
+                        let _ = oneshot_tx.send(super::storage::storage_get(&key).await.ok());
                     }
 
                     super::WebRunnerOutput::StorageSet(key, value, oneshot_tx) => {
-                        if super::storage::local_storage().is_none() {
-                            let _ = oneshot_tx.send(false);
-                        } else {
-                            super::storage::local_storage_set(&key, &value);
-                            let _ = oneshot_tx.send(true);
-                        }
+                        let _ =
+                            oneshot_tx.send(super::storage::storage_set(&key, value).await.is_ok());
                     }
                 }
             }
         });
 
-        Ok(())
+        Ok(std::sync::Arc::new(parking_lot::Mutex::new(Some(panic_tx))))
     }
 
     /// Create the application, install callbacks, and start running the app.
     ///
     /// # Errors
-    /// Failing to initialize graphics.
+    /// Failing to initialize graphics, or failure to create app.
     pub async fn start(
         &self,
         canvas: web_sys::OffscreenCanvas,
@@ -110,11 +131,10 @@ impl WebRunner {
         self.destroy();
 
         let runner = AppRunner::new(canvas, web_options, app_creator, worker_options).await?;
+
         self.runner.replace(Some(runner));
 
-        {
-            events::request_animation_frame(self.clone())?;
-        }
+        self.request_animation_frame()?;
 
         Ok(())
     }
@@ -144,11 +164,21 @@ impl WebRunner {
                 }
             }
         }
+
+        if let Some(context) = self.resize_observer.take() {
+            context.resize_observer.disconnect();
+            drop(context.closure);
+        }
     }
 
     /// Shut down eframe and clean up resources.
     pub fn destroy(&self) {
         self.unsubscribe_from_all_events();
+
+        if let Some(frame) = self.frame.take() {
+            let window = web_sys::window().unwrap();
+            window.cancel_animation_frame(frame.id).ok();
+        }
 
         if let Some(runner) = self.runner.replace(None) {
             runner.destroy();
@@ -221,23 +251,82 @@ impl WebRunner {
 
         Ok(())
     }
+
+    /// Request an animation frame from the browser in which we can perform a paint.
+    ///
+    /// It is safe to call `request_animation_frame` multiple times in quick succession,
+    /// this function guarantees that only one animation frame is scheduled at a time.
+    pub(crate) fn request_animation_frame(&self) -> Result<(), wasm_bindgen::JsValue> {
+        if self.frame.borrow().is_some() {
+            // there is already an animation frame in flight
+            return Ok(());
+        }
+
+        let worker = luminol_web::bindings::worker().unwrap();
+        let closure = Closure::once({
+            let runner_ref = self.clone();
+            move || {
+                // We can paint now, so clear the animation frame.
+                // This drops the `closure` and allows another
+                // animation frame to be scheduled
+                let _ = runner_ref.frame.take();
+                events::paint_and_schedule(&runner_ref)
+            }
+        });
+
+        let id = worker.request_animation_frame(closure.as_ref().unchecked_ref())?;
+        self.frame.borrow_mut().replace(AnimationFrameRequest {
+            id,
+            _closure: closure,
+        });
+
+        Ok(())
+    }
+
+    pub(crate) fn set_resize_observer(
+        &self,
+        resize_observer: web_sys::ResizeObserver,
+        closure: Closure<dyn FnMut(js_sys::Array)>,
+    ) {
+        self.resize_observer
+            .borrow_mut()
+            .replace(ResizeObserverContext {
+                resize_observer,
+                closure,
+            });
+    }
 }
 
 // ----------------------------------------------------------------------------
 
-struct TargetEvent {
-    target: web_sys::EventTarget,
-    event_name: String,
-    closure: Closure<dyn FnMut(web_sys::Event)>,
+// https://rustwasm.github.io/wasm-bindgen/api/wasm_bindgen/closure/struct.Closure.html#using-fnonce-and-closureonce-with-requestanimationframe
+struct AnimationFrameRequest {
+    /// Represents the ID of a frame in flight.
+    id: i32,
+
+    /// The callback given to `request_animation_frame`, stored here both to prevent it
+    /// from being canceled, and from having to `.forget()` it.
+    _closure: Closure<dyn FnMut() -> Result<(), JsValue>>,
+}
+
+struct ResizeObserverContext {
+    resize_observer: web_sys::ResizeObserver,
+    closure: Closure<dyn FnMut(js_sys::Array)>,
+}
+
+pub(super) struct TargetEvent {
+    pub(super) target: web_sys::EventTarget,
+    pub(super) event_name: String,
+    pub(super) closure: Closure<dyn FnMut(web_sys::Event)>,
 }
 
 #[allow(unused)]
-struct IntervalHandle {
-    handle: i32,
-    closure: Closure<dyn FnMut()>,
+pub(super) struct IntervalHandle {
+    pub(super) handle: i32,
+    pub(super) closure: Closure<dyn FnMut()>,
 }
 
-enum EventToUnsubscribe {
+pub(super) enum EventToUnsubscribe {
     TargetEvent(TargetEvent),
 
     #[allow(unused)]
@@ -247,14 +336,14 @@ enum EventToUnsubscribe {
 impl EventToUnsubscribe {
     pub fn unsubscribe(self) -> Result<(), JsValue> {
         match self {
-            EventToUnsubscribe::TargetEvent(handle) => {
+            Self::TargetEvent(handle) => {
                 handle.target.remove_event_listener_with_callback(
                     handle.event_name.as_str(),
                     handle.closure.as_ref().unchecked_ref(),
                 )?;
                 Ok(())
             }
-            EventToUnsubscribe::IntervalHandle(handle) => {
+            Self::IntervalHandle(handle) => {
                 let window = web_sys::window().unwrap();
                 window.clear_interval_with_handle(handle.handle);
                 Ok(())

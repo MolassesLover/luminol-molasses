@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -22,12 +22,16 @@
 // terms of the Steamworks API by Valve Corporation, the licensors of this
 // Program grant you additional permission to convey the resulting work.
 
-use anyhow::Context;
+use color_eyre::eyre::WrapErr;
 use luminol_data::rpg;
 use std::{
     cell::{RefCell, RefMut},
     collections::HashMap,
 };
+
+use crate::error;
+
+pub mod data_formats;
 
 // TODO convert this to an option like project config?
 #[allow(clippy::large_enum_variant)]
@@ -56,65 +60,12 @@ pub enum Data {
     },
 }
 
-fn read_data<T>(
-    filesystem: &impl luminol_filesystem::FileSystem,
-    filename: impl AsRef<camino::Utf8Path>,
-) -> anyhow::Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let path = camino::Utf8PathBuf::from("Data").join(filename);
-    let data = filesystem.read(path)?;
-
-    alox_48::from_bytes(&data).map_err(anyhow::Error::from)
-}
-
-fn write_data(
-    data: &impl serde::Serialize,
-    filesystem: &impl luminol_filesystem::FileSystem,
-    filename: impl AsRef<camino::Utf8Path>,
-) -> anyhow::Result<()> {
-    let path = camino::Utf8PathBuf::from("Data").join(filename);
-
-    let bytes = alox_48::to_bytes(data)?;
-    filesystem.write(path, bytes).map_err(anyhow::Error::from)
-}
-
-fn read_nil_padded<T>(
-    filesystem: &impl luminol_filesystem::FileSystem,
-    filename: impl AsRef<camino::Utf8Path>,
-) -> anyhow::Result<Vec<T>>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let path = camino::Utf8PathBuf::from("Data").join(filename);
-    let data = filesystem.read(path)?;
-
-    let mut de = alox_48::Deserializer::new(&data)?;
-
-    luminol_data::helpers::nil_padded::deserialize(&mut de).map_err(anyhow::Error::from)
-}
-
-fn write_nil_padded(
-    data: &[impl serde::Serialize],
-    filesystem: &impl luminol_filesystem::FileSystem,
-    filename: impl AsRef<camino::Utf8Path>,
-) -> anyhow::Result<()> {
-    let path = camino::Utf8PathBuf::from("Data").join(filename);
-
-    let mut ser = alox_48::Serializer::new();
-
-    luminol_data::helpers::nil_padded::serialize(data, &mut ser)?;
-    filesystem
-        .write(path, ser.output)
-        .map_err(anyhow::Error::from)
-}
-
 macro_rules! load {
-    ($fs:ident, $type:ident) => {
+    ($fs:ident, $type:ident, $format_handler:ident) => {
         RefCell::new(rpg::$type {
-            data: read_nil_padded($fs, format!("{}.rxdata", stringify!($type)))
-                .context(format!("while reading {}.rxdata", stringify!($type)))?,
+            data: $format_handler
+                .read_nil_padded($fs, format!("{}", stringify!($type)))
+                .wrap_err_with(|| format!("While reading {}", stringify!($type)))?,
             ..Default::default()
         })
     };
@@ -129,46 +80,51 @@ macro_rules! from_defaults {
 }
 
 macro_rules! save {
-    ($fs:ident, $type:ident, $field:ident) => {{
-        let mut borrowed = $field.borrow_mut();
-        let modified = borrowed.modified;
-        if modified {
-            borrowed.modified = false;
-            write_nil_padded(&borrowed.data, $fs, format!("{}.rxdata", stringify!($type)))
-                .context(format!("while saving {}.rxdata", stringify!($type)))?;
+    ($fs:ident, $type:ident, $field:ident, $format_handler:ident) => {{
+        let borrowed = $field.get_mut();
+        if borrowed.modified {
+            $format_handler
+                .write_nil_padded(&borrowed.data, $fs, format!("{}", stringify!($type)))
+                .wrap_err_with(|| format!("While saving {}", stringify!($type)))?;
         }
-        modified
+        borrowed.modified
     }};
 }
+
 impl Data {
     /// Load all data required when opening a project.
     /// Does not load config. That is expected to have been loaded beforehand.
     pub fn load(
         &mut self,
         filesystem: &impl luminol_filesystem::FileSystem,
+        toasts: &mut crate::Toasts,
         config: &mut luminol_config::project::Config,
-    ) -> anyhow::Result<()> {
+    ) -> color_eyre::Result<()> {
+        let handler = data_formats::Handler::new(config.project.data_format);
+
         let map_infos = RefCell::new(rpg::MapInfos {
-            data: read_data(filesystem, "MapInfos.rxdata")
-                .context("while reading MapInfos.rxdata")?,
+            data: handler
+                .read_data(filesystem, "MapInfos")
+                .wrap_err("While reading MapInfos")?,
             ..Default::default()
         });
 
-        let mut system = read_data::<rpg::System>(filesystem, "System.rxdata")
-            .context("while reading System.rxdata")?;
+        let mut system = handler
+            .read_data::<rpg::System>(filesystem, "System")
+            .wrap_err("While reading System")?;
         system.magic_number = rand::random();
 
         let system = RefCell::new(system);
 
         let mut scripts = None;
         let scripts_paths = [
-            std::mem::take(&mut config.project.scripts_path),
+            config.project.scripts_path.clone(),
             "xScripts".to_string(),
             "Scripts".to_string(),
         ];
 
         for script_path in scripts_paths {
-            match read_data(filesystem, format!("{script_path}.rxdata")) {
+            match handler.read_data(filesystem, format!("{script_path}")) {
                 Ok(s) => {
                     config.project.scripts_path = script_path;
                     scripts = Some(rpg::Scripts {
@@ -177,11 +133,18 @@ impl Data {
                     });
                     break;
                 }
-                Err(e) => eprintln!("error loading scripts from {script_path}: {e}"),
+                Err(e) => {
+                    error!(
+                        *toasts,
+                        e.wrap_err(format!(
+                            "While attempting to read scripts from {script_path}"
+                        ))
+                    )
+                }
             }
         }
         let Some(scripts) = scripts else {
-            anyhow::bail!(
+            color_eyre::eyre::bail!(
                 "Unable to load scripts (tried {}, xScripts, and Scripts first)",
                 config.project.scripts_path
             );
@@ -191,18 +154,18 @@ impl Data {
         let maps = RefCell::new(std::collections::HashMap::with_capacity(32));
 
         *self = Self::Loaded {
-            actors: load!(filesystem, Actors),
-            animations: load!(filesystem, Animations),
-            armors: load!(filesystem, Armors),
-            classes: load!(filesystem, Classes),
-            common_events: load!(filesystem, CommonEvents),
-            enemies: load!(filesystem, Enemies),
-            items: load!(filesystem, Items),
-            skills: load!(filesystem, Skills),
-            states: load!(filesystem, States),
-            tilesets: load!(filesystem, Tilesets),
-            troops: load!(filesystem, Troops),
-            weapons: load!(filesystem, Weapons),
+            actors: load!(filesystem, Actors, handler),
+            animations: load!(filesystem, Animations, handler),
+            armors: load!(filesystem, Armors, handler),
+            classes: load!(filesystem, Classes, handler),
+            common_events: load!(filesystem, CommonEvents, handler),
+            enemies: load!(filesystem, Enemies, handler),
+            items: load!(filesystem, Items, handler),
+            skills: load!(filesystem, Skills, handler),
+            states: load!(filesystem, States, handler),
+            tilesets: load!(filesystem, Tilesets, handler),
+            troops: load!(filesystem, Troops, handler),
+            weapons: load!(filesystem, Weapons, handler),
             map_infos,
             system,
             scripts,
@@ -270,7 +233,9 @@ impl Data {
         &mut self,
         filesystem: &impl luminol_filesystem::FileSystem,
         config: &luminol_config::project::Config,
-    ) -> anyhow::Result<()> {
+    ) -> color_eyre::Result<()> {
+        let handler = data_formats::Handler::new(config.project.data_format);
+
         let Self::Loaded {
             actors,
             animations,
@@ -295,50 +260,45 @@ impl Data {
 
         let mut modified = false;
 
-        modified |= save!(filesystem, Actors, actors);
-        modified |= save!(filesystem, Animations, animations);
-        modified |= save!(filesystem, Armors, armors);
-        modified |= save!(filesystem, Classes, classes);
-        modified |= save!(filesystem, CommonEvents, common_events);
-        modified |= save!(filesystem, Enemies, enemies);
-        modified |= save!(filesystem, Items, items);
-        modified |= save!(filesystem, Skills, skills);
-        modified |= save!(filesystem, States, states);
-        modified |= save!(filesystem, Tilesets, tilesets);
-        modified |= save!(filesystem, Troops, troops);
-        modified |= save!(filesystem, Weapons, weapons);
+        modified |= save!(filesystem, Actors, actors, handler);
+        modified |= save!(filesystem, Animations, animations, handler);
+        modified |= save!(filesystem, Armors, armors, handler);
+        modified |= save!(filesystem, Classes, classes, handler);
+        modified |= save!(filesystem, CommonEvents, common_events, handler);
+        modified |= save!(filesystem, Enemies, enemies, handler);
+        modified |= save!(filesystem, Items, items, handler);
+        modified |= save!(filesystem, Skills, skills, handler);
+        modified |= save!(filesystem, States, states, handler);
+        modified |= save!(filesystem, Tilesets, tilesets, handler);
+        modified |= save!(filesystem, Troops, troops, handler);
+        modified |= save!(filesystem, Weapons, weapons, handler);
 
         {
-            let mut map_infos = map_infos.borrow_mut();
+            let map_infos = map_infos.get_mut();
             if map_infos.modified {
                 modified = true;
-                map_infos.modified = false;
-                write_data(&map_infos.data, filesystem, "MapInfos.rxdata")
-                    .context("while saving MapInfos.rxdata")?;
+                handler
+                    .write_data(&map_infos.data, filesystem, "MapInfos")
+                    .wrap_err("While saving MapInfos")?;
             }
         }
 
         {
-            let mut scripts = scripts.borrow_mut();
+            let scripts = scripts.get_mut();
             if scripts.modified {
                 modified = true;
-                scripts.modified = false;
-                write_data(
-                    &scripts.data,
-                    filesystem,
-                    format!("{}.rxdata", config.project.scripts_path),
-                )?;
+                handler.write_data(&scripts.data, filesystem, &config.project.scripts_path)?;
             }
         }
 
         {
-            let mut maps = maps.borrow_mut();
-            maps.iter_mut().try_for_each(|(id, map)| {
+            let maps = maps.get_mut();
+            maps.iter().try_for_each(|(id, map)| {
                 if map.modified {
                     modified = true;
-                    map.modified = false;
-                    write_data(map, filesystem, format!("Map{id:0>3}.rxdata"))
-                        .with_context(|| format!("while saving map {id:0>3}"))
+                    handler
+                        .write_data(map, filesystem, format!("Map{id:0>3}"))
+                        .wrap_err_with(|| format!("While saving map {id:0>3}"))
                 } else {
                     Ok(())
                 }
@@ -348,13 +308,62 @@ impl Data {
         {
             let system = system.get_mut();
             if system.modified || modified {
-                system.modified = false;
                 system.magic_number = rand::random();
-                write_data(system, filesystem, "System.rxdata")
-                    .context("while saving System.rxdata")?;
+                handler
+                    .write_data(system, filesystem, "System")
+                    .wrap_err("While saving System")?;
+                system.modified = false;
             }
         }
 
+        let pretty_config = ron::ser::PrettyConfig::new()
+            .struct_names(true)
+            .enumerate_arrays(true);
+
+        let project_config = ron::ser::to_string_pretty(&config.project, pretty_config.clone())
+            .wrap_err("While serializing .luminol/config")?;
+        filesystem
+            .write(".luminol/config", project_config)
+            .wrap_err("While writing .luminol/config")?;
+
+        let command_db = ron::ser::to_string_pretty(&config.command_db, pretty_config.clone())
+            .wrap_err("While serializing .luminol/commands")?;
+        filesystem
+            .write(".luminol/commands", command_db)
+            .wrap_err("While writing .luminol/config")?;
+
+        // even though Ini uses fmt::write internally, it provides no easy way to write to a string.
+        // so we need to open a file instead
+        let mut ini_file = filesystem
+            .open_file(
+                "Game.ini",
+                luminol_filesystem::OpenFlags::Create
+                    | luminol_filesystem::OpenFlags::Write
+                    | luminol_filesystem::OpenFlags::Truncate,
+            )
+            .wrap_err("While opening Game.ini")?;
+        config
+            .game_ini
+            .write_to(&mut ini_file)
+            .wrap_err("While serializing Game.ini")?;
+
+        actors.borrow_mut().modified = false;
+        animations.borrow_mut().modified = false;
+        armors.borrow_mut().modified = false;
+        classes.borrow_mut().modified = false;
+        common_events.borrow_mut().modified = false;
+        enemies.borrow_mut().modified = false;
+        items.borrow_mut().modified = false;
+        skills.borrow_mut().modified = false;
+        states.borrow_mut().modified = false;
+        tilesets.borrow_mut().modified = false;
+        troops.borrow_mut().modified = false;
+        weapons.borrow_mut().modified = false;
+        map_infos.borrow_mut().modified = false;
+        scripts.borrow_mut().modified = false;
+        for (_, map) in maps.borrow_mut().iter_mut() {
+            map.modified = false;
+        }
         Ok(())
     }
 }
@@ -399,6 +408,7 @@ impl Data {
         &self,
         id: usize,
         filesystem: &impl luminol_filesystem::FileSystem,
+        config: &luminol_config::project::Config,
     ) -> RefMut<'_, rpg::Map> {
         let maps_ref = match self {
             Self::Loaded { maps, .. } => maps.borrow_mut(),
@@ -407,7 +417,10 @@ impl Data {
         RefMut::map(maps_ref, |maps| {
             // FIXME
             maps.entry(id).or_insert_with(|| {
-                read_data(filesystem, format!("Map{id:0>3}.rxdata")).expect("failed to load map")
+                let handler = data_formats::Handler::new(config.project.data_format);
+                handler
+                    .read_data(filesystem, format!("Map{id:0>3}"))
+                    .expect("failed to load map")
             })
         })
     }

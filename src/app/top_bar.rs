@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -29,14 +29,14 @@ use strum::IntoEnumIterator;
 pub struct TopBar {
     #[cfg(not(target_arch = "wasm32"))]
     fullscreen: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) show_log: bool,
 }
 
 impl TopBar {
     /// Display the top bar.
     #[allow(unused_variables)]
     pub fn ui(&mut self, ui: &mut egui::Ui, update_state: &mut luminol_core::UpdateState<'_>) {
-        egui::widgets::global_dark_light_mode_switch(ui);
-
         #[cfg(not(target_arch = "wasm32"))]
         {
             let old_fullscreen = self.fullscreen;
@@ -93,27 +93,11 @@ impl TopBar {
             ui.separator();
 
             ui.add_enabled_ui(update_state.filesystem.project_loaded(), |ui| {
-                if ui.button("Project Config").clicked() {
-                    update_state
-                        .edit_windows
-                        .add_window(luminol_ui::windows::config_window::Window {});
-                }
-
                 if ui.button("Close Project").clicked() {
                     update_state.project_manager.close_project();
                 }
 
                 save_project |= ui.button("Save Project").clicked();
-            });
-
-            ui.separator();
-
-            ui.add_enabled_ui(update_state.filesystem.project_loaded(), |ui| {
-                if ui.button("Command Maker").clicked() {
-                    // update_state.windows.add_window(
-                    //     luminol_ui::windows::command_gen::CommandGeneratorWindow::default(),
-                    // );
-                }
             });
 
             #[cfg(not(target_arch = "wasm32"))]
@@ -141,14 +125,23 @@ impl TopBar {
             if ui.button("Preferences").clicked() {
                 update_state
                     .edit_windows
-                    .add_window(luminol_ui::windows::global_config_window::Window::default())
+                    .add_window(luminol_ui::windows::preferences::Window::default())
             }
 
-            if ui.button("Appearance").clicked() {
-                update_state
-                    .edit_windows
-                    .add_window(luminol_ui::windows::appearance::Window::default())
-            }
+            ui.add_enabled_ui(update_state.filesystem.project_loaded(), |ui| {
+                if ui.button("Project Config").clicked() {
+                    let config = update_state.project_config.as_ref().unwrap();
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::config_window::Window::new(config));
+                }
+
+                if ui.button("Event Commands").clicked() {
+                    // update_state.windows.add_window(
+                    //     luminol_ui::windows::command_gen::CommandGeneratorWindow::default(),
+                    // );
+                }
+            });
         });
 
         ui.separator();
@@ -168,11 +161,17 @@ impl TopBar {
                         .add_window(luminol_ui::windows::map_picker::Window::default());
                 }
 
-                if ui.button("Items").clicked() {
-                    update_state
-                        .edit_windows
-                        .add_window(luminol_ui::windows::items::Window::new(update_state.data));
-                }
+                ui.add_enabled_ui(false, |ui| {
+                    if ui.button("Tilesets [TODO]").clicked() {
+                        todo!();
+                    }
+                });
+
+                ui.add_enabled_ui(false, |ui| {
+                    if ui.button("Animations [TODO]").clicked() {
+                        todo!();
+                    }
+                });
 
                 if ui.button("Common Events").clicked() {
                     update_state
@@ -191,6 +190,70 @@ impl TopBar {
                         luminol_ui::windows::sound_test::Window::new(update_state.filesystem),
                     );
                 }
+
+                ui.add_enabled_ui(false, |ui| {
+                    if ui.button("System [TODO]").clicked() {
+                        todo!();
+                    }
+                });
+
+                ui.separator();
+
+                if ui.button("Items").clicked() {
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::items::Window::new(update_state));
+                }
+
+                if ui.button("Skills").clicked() {
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::skills::Window::new());
+                }
+
+                if ui.button("Weapons").clicked() {
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::weapons::Window::new());
+                }
+
+                if ui.button("Armor").clicked() {
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::armor::Window::new());
+                }
+
+                if ui.button("States").clicked() {
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::states::Window::new());
+                }
+
+                ui.separator();
+
+                if ui.button("Actors").clicked() {
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::actors::Window::new(update_state));
+                }
+
+                if ui.button("Classes").clicked() {
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::classes::Window::new());
+                }
+
+                if ui.button("Enemies").clicked() {
+                    update_state
+                        .edit_windows
+                        .add_window(luminol_ui::windows::enemies::Window::new(update_state));
+                }
+
+                ui.add_enabled_ui(false, |ui| {
+                    if ui.button("Troops [TODO]").clicked() {
+                        todo!();
+                    }
+                });
             });
         });
 
@@ -208,6 +271,12 @@ impl TopBar {
                 update_state
                     .edit_windows
                     .add_window(luminol_ui::windows::archive_manager::Window::default());
+            }
+
+            if ui.button("Script Manager").clicked() {
+                update_state
+                    .edit_windows
+                    .add_window(luminol_ui::windows::script_manager::Window::default());
             }
         });
 
@@ -264,6 +333,21 @@ impl TopBar {
                     .edit_windows
                     .add_window(luminol_ui::windows::misc::FilesystemDebug::default());
             }
+
+            if ui.button("WGPU Debug Info").clicked() {
+                update_state
+                    .edit_windows
+                    .add_window(luminol_ui::windows::misc::WgpuDebugInfo::new(update_state));
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                ui.separator();
+
+                if ui.button("Log").clicked() {
+                    self.show_log = true;
+                }
+            }
         });
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -272,52 +356,53 @@ impl TopBar {
 
             ui.add_enabled_ui(update_state.filesystem.project_loaded(), |ui| {
                 if ui.button("Playtest").clicked() {
-                    let mut cmd = luminol_term::CommandBuilder::new("steamshim");
-                    cmd.cwd(
-                        update_state
-                            .filesystem
-                            .project_path()
-                            .expect("project not loaded"),
-                    );
+                    let program = update_state
+                        .project_config
+                        .as_ref()
+                        .expect("project not loaded")
+                        .project
+                        .playtest_exe
+                        .clone();
+                    let working_directory = update_state
+                        .filesystem
+                        .project_path()
+                        .expect("project not loaded")
+                        .into_std_path_buf();
 
-                    let result = luminol_ui::windows::console::Window::new(cmd).or_else(|_| {
-                        let mut cmd = luminol_term::CommandBuilder::new("game");
-                        cmd.cwd(
-                            update_state
-                                .filesystem
-                                .project_path()
-                                .expect("project not loaded"),
-                        );
+                    let exec = luminol_term::widget::ExecOptions {
+                        program: Some(program.clone()),
+                        working_directory: Some(working_directory),
+                        ..Default::default()
+                    };
 
-                        luminol_ui::windows::console::Window::new(cmd)
-                    });
-
-                    match result {
+                    match luminol_ui::windows::console::Window::new(exec.clone(), update_state) {
                         Ok(w) => update_state.edit_windows.add_window(w),
-                        Err(e) => update_state.toasts.error(format!(
-                            "error starting game (tried steamshim.exe and then game.exe): {e}"
-                        )),
+                        Err(e) => luminol_core::error!(
+                            update_state.toasts,
+                            color_eyre::eyre::eyre!(e)
+                                .wrap_err(format!("Error starting {program:?}"))
+                        ),
                     }
                 }
 
                 if ui.button("Terminal").clicked() {
-                    #[cfg(windows)]
-                    let shell = "powershell";
-                    #[cfg(unix)]
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
-                    let mut cmd = luminol_term::CommandBuilder::new(shell);
-                    cmd.cwd(
-                        update_state
-                            .filesystem
-                            .project_path()
-                            .expect("project not loaded"),
-                    );
+                    let working_directory = update_state
+                        .filesystem
+                        .project_path()
+                        .expect("project not loaded")
+                        .into_std_path_buf();
 
-                    match luminol_ui::windows::console::Window::new(cmd) {
+                    let exec = luminol_term::widget::ExecOptions {
+                        working_directory: Some(working_directory),
+                        ..Default::default()
+                    };
+
+                    match luminol_ui::windows::console::Window::new(exec, update_state) {
                         Ok(w) => update_state.edit_windows.add_window(w),
-                        Err(e) => update_state
-                            .toasts
-                            .error(format!("error starting shell: {e}")),
+                        Err(e) => luminol_core::error!(
+                            update_state.toasts,
+                            color_eyre::eyre::eyre!(e).wrap_err("Error starting shell")
+                        ),
                     }
                 }
             });
@@ -325,11 +410,30 @@ impl TopBar {
 
         ui.separator();
 
-        ui.label("Brush:");
+        ui.vertical(|ui| {
+            ui.add_space(ui.spacing().button_padding.y.max(
+                (ui.spacing().interact_size.y - ui.text_style_height(&egui::TextStyle::Body)) / 2.,
+            ));
+            ui.label("Brush:");
+        });
 
         for brush in luminol_core::Pencil::iter() {
             ui.selectable_value(&mut update_state.toolbar.pencil, brush, brush.to_string());
         }
+
+        ui.add(egui::Slider::new(
+            &mut update_state.toolbar.brush_density,
+            0.0..=1.0,
+        ))
+        .on_hover_text("The proportion of tiles the brush is able to draw on");
+
+        let alt_down = ui.input(|i| i.modifiers.alt);
+        let mut brush_random = update_state.toolbar.brush_random != alt_down;
+        ui.add(egui::Checkbox::new(
+            &mut brush_random, "Randomize ID",
+        ))
+        .on_hover_text("If enabled, the brush will randomly place tiles out of the selected tiles in the tilepicker instead of placing them in a pattern");
+        update_state.toolbar.brush_random = brush_random != alt_down;
 
         if open_project {
             update_state.project_manager.open_project_picker();
@@ -340,9 +444,9 @@ impl TopBar {
                 match update_state.data.save(update_state.filesystem, config) {
                     Ok(_) => {
                         update_state.modified.set(false);
-                        update_state.toasts.info("Saved project successfully!")
+                        luminol_core::info!(update_state.toasts, "Saved project successfully!");
                     }
-                    Err(e) => update_state.toasts.error(e.to_string()),
+                    Err(e) => luminol_core::error!(update_state.toasts, e),
                 }
             }
         }

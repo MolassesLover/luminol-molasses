@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -125,14 +125,6 @@ macro_rules! window_enum {
                 }
             }
 
-            fn name(&self) -> String {
-                match self {
-                    $(
-                        Self::$variant(v) => v.name(),
-                    )*
-                }
-            }
-
             fn id(&self) -> egui::Id {
                 match self {
                     $(
@@ -172,12 +164,11 @@ tab_enum! {
 window_enum! {
     pub enum Window {
         About(windows::about::Window),
-        Appearance(windows::appearance::Window),
         CommonEvent(windows::common_event_edit::Window),
         ProjectConfig(windows::config_window::Window),
         Console(windows::console::Window),
         EventEdit(windows::event_edit::Window),
-        GlobalConfig(windows::global_config_window::Window),
+        Preferences(windows::preferences::Window),
         Items(windows::items::Window),
         MapPicker(windows::map_picker::Window),
         EguiInspection(windows::misc::EguiInspection),
@@ -185,18 +176,18 @@ window_enum! {
         FilesystemDebug(windows::misc::FilesystemDebug),
         NewProject(windows::new_project::Window),
         ScriptEdit(windows::script_edit::Window),
-        SoundTest(windows::sound_test::Window)
+        SoundTest(windows::sound_test::Window),
+        WgpuDebug(windows::misc::WgpuDebugInfo)
     }
 }
 #[cfg(target_arch = "wasm32")]
 window_enum! {
     pub enum Window {
         About(windows::about::Window),
-        Appearance(windows::appearance::Window),
         CommonEvent(windows::common_event_edit::Window),
         ProjectConfig(windows::config_window::Window),
         EventEdit(windows::event_edit::Window),
-        GlobalConfig(windows::global_config_window::Window),
+        Preferences(windows::preferences::Window),
         Items(windows::items::Window),
         MapPicker(windows::map_picker::Window),
         EguiInspection(windows::misc::EguiInspection),

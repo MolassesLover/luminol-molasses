@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -22,6 +22,7 @@
 // terms of the Steamworks API by Valve Corporation, the licensors of this
 // Program grant you additional permission to convey the resulting work.
 
+use crate::UiExt;
 use itertools::Itertools;
 
 pub struct FileSystemView<T> {
@@ -85,7 +86,7 @@ impl Entry {
 
 impl<T> FileSystemView<T>
 where
-    T: luminol_filesystem::FileSystem,
+    T: luminol_filesystem::ReadDir,
 {
     pub fn new(id: egui::Id, filesystem: T, root_name: String) -> Self {
         let mut arena = indextree::Arena::new();
@@ -192,8 +193,13 @@ where
             ancestors.reverse();
             let path = ancestors.join("/");
 
-            let mut subentries = self.filesystem.read_dir(path).unwrap_or_else(|e| {
-                update_state.toasts.error(e.to_string());
+            let mut subentries = self.filesystem.read_dir(&path).unwrap_or_else(|e| {
+                luminol_core::error!(
+                    update_state.toasts,
+                    e.wrap_err(format!(
+                        "Error reading contents of directory {path} in filesystem view"
+                    ))
+                );
                 Vec::new()
             });
             subentries.sort_unstable_by(|a, b| {
@@ -260,19 +266,16 @@ where
 
         let mut should_toggle = false;
 
-        let mut frame = egui::containers::Frame::none();
-        if self.row_index % 2 != 0 {
-            frame = frame.fill(ui.visuals().faint_bg_color);
-        }
+        let is_faint = self.row_index % 2 != 0;
         self.row_index += 1;
 
         let mut header_response = None;
 
         match self.arena[node_id].get_mut() {
             Entry::File { name, selected } => {
-                frame.show(ui, |ui| {
+                ui.with_stripe(is_faint, |ui| {
                     if ui
-                        .add(egui::SelectableLabel::new(*selected, name.to_string()))
+                        .selectable_label(*selected, ui.truncate_text(name.to_string()))
                         .clicked()
                     {
                         should_toggle = true;
@@ -310,11 +313,11 @@ where
                 let layout = *ui.layout();
                 header_response = Some(header.show_header(ui, |ui| {
                     ui.with_layout(layout, |ui| {
-                        frame.show(ui, |ui| {
+                        ui.with_stripe(is_faint, |ui| {
                             if ui
-                                .add(egui::SelectableLabel::new(
+                                .selectable_label(
                                     *selected,
-                                    format!(
+                                    ui.truncate_text(format!(
                                         "{}   {}",
                                         if *selected {
                                             '▣'
@@ -325,8 +328,8 @@ where
                                             '⊟'
                                         },
                                         name
-                                    ),
-                                ))
+                                    )),
+                                )
                                 .clicked()
                             {
                                 should_toggle = true;
@@ -638,17 +641,17 @@ pub struct Metadata {
 /// none of its contents.
 pub struct SelectedIter<'a, T>
 where
-    T: luminol_filesystem::FileSystem,
+    T: luminol_filesystem::ReadDir,
 {
     view: &'a FileSystemView<T>,
     edge: Option<indextree::NodeEdge>,
 }
 
-impl<'a, T> std::iter::FusedIterator for SelectedIter<'a, T> where T: luminol_filesystem::FileSystem {}
+impl<'a, T> std::iter::FusedIterator for SelectedIter<'a, T> where T: luminol_filesystem::ReadDir {}
 
 impl<'a, T> Iterator for SelectedIter<'a, T>
 where
-    T: luminol_filesystem::FileSystem,
+    T: luminol_filesystem::ReadDir,
 {
     type Item = Metadata;
     fn next(&mut self) -> Option<Self::Item> {
@@ -721,7 +724,7 @@ where
 
 impl<'a, T> IntoIterator for &'a FileSystemView<T>
 where
-    T: luminol_filesystem::FileSystem,
+    T: luminol_filesystem::ReadDir,
 {
     type Item = Metadata;
     type IntoIter = SelectedIter<'a, T>;

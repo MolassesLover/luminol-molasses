@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -23,24 +23,24 @@
 // Program grant you additional permission to convey the resulting work.
 
 pub struct Window {
-    term: luminol_term::Terminal,
+    term: luminol_term::widget::ProcessTerminal,
 }
 
 impl Window {
-    pub fn new(command: luminol_term::CommandBuilder) -> Result<Self, luminol_term::Error> {
+    pub fn new(
+        exec: luminol_term::widget::ExecOptions,
+        update_state: &luminol_core::UpdateState<'_>,
+    ) -> std::io::Result<Self> {
         Ok(Self {
-            term: luminol_term::Terminal::new(command)?,
+            // TODO
+            term: luminol_term::widget::Terminal::process(exec, update_state)?,
         })
     }
 }
 
 impl luminol_core::Window for Window {
-    fn name(&self) -> String {
-        self.term.title()
-    }
-
     fn id(&self) -> egui::Id {
-        egui::Id::new("Console")
+        self.term.id
     }
 
     fn requires_filesystem(&self) -> bool {
@@ -53,15 +53,15 @@ impl luminol_core::Window for Window {
         open: &mut bool,
         update_state: &mut luminol_core::UpdateState<'_>,
     ) {
-        egui::Window::new(self.name())
-            .id(self.term.id())
+        egui::Window::new(&self.term.title)
+            .id(self.term.id)
             .open(open)
-            .resizable(false)
             .show(ctx, |ui| {
-                if let Err(e) = self.term.ui(ui) {
-                    update_state
-                        .toasts
-                        .error(format!("error displaying terminal: {e:?}"));
+                if let Err(e) = self.term.ui(update_state, ui) {
+                    luminol_core::error!(
+                        update_state.toasts,
+                        e.wrap_err("Error displaying terminal"),
+                    );
                 }
             });
     }

@@ -2,9 +2,10 @@ use egui::TexturesDelta;
 
 use crate::{epi, App};
 
-use super::{now_sec, web_painter::WebPainter, NeedRepaint};
+use super::{now_sec, text_agent::TextAgent, web_painter::WebPainter, NeedRepaint};
 
 pub struct AppRunner {
+    #[allow(dead_code)]
     web_options: crate::WebOptions,
     pub(crate) frame: epi::Frame,
     egui_ctx: egui::Context,
@@ -13,8 +14,6 @@ pub struct AppRunner {
     app: Box<dyn epi::App>,
     pub(crate) needs_repaint: std::sync::Arc<NeedRepaint>,
     last_save_time: f64,
-    pub(crate) text_cursor_pos: Option<egui::Pos2>,
-    pub(crate) mutable_text_under_cursor: bool,
 
     // Output for the last run:
     textures_delta: TexturesDelta,
@@ -32,7 +31,7 @@ impl Drop for AppRunner {
 
 impl AppRunner {
     /// # Errors
-    /// Failure to initialize WebGL renderer.
+    /// Failure to initialize WebGL renderer, or failure to create app.
     pub async fn new(
         canvas: web_sys::OffscreenCanvas,
         web_options: crate::WebOptions,
@@ -87,10 +86,12 @@ impl AppRunner {
 
         let egui_ctx = egui::Context::default();
         egui_ctx.set_os(egui::os::OperatingSystem::from_user_agent(&user_agent));
-        super::storage::load_memory(&egui_ctx, &worker_options.channels).await;
+        super::storage::load_memory(&egui_ctx).await;
 
         egui_ctx.options_mut(|o| {
-            // On web, the browser controls the zoom factor:
+            // On web by default egui follows the zoom factor of the browser,
+            // and lets the browser handle the zoom shortscuts.
+            // A user can still zoom egui separately by calling [`egui::Context::set_zoom_factor`].
             o.zoom_with_keyboard = false;
             o.zoom_factor = 1.0;
         });
@@ -98,7 +99,7 @@ impl AppRunner {
         let theme = system_theme.unwrap_or(web_options.default_theme);
         egui_ctx.set_visuals(theme.egui_visuals());
 
-        let app = app_creator(&epi::CreationContext {
+        let cc = epi::CreationContext {
             egui_ctx: egui_ctx.clone(),
             integration_info: info.clone(),
             storage: Some(&storage),
@@ -106,11 +107,15 @@ impl AppRunner {
             #[cfg(feature = "glow")]
             gl: Some(painter.gl().clone()),
 
+            #[cfg(feature = "glow")]
+            get_proc_address: None,
+
             #[cfg(all(feature = "wgpu", not(feature = "glow")))]
             wgpu_render_state: painter.render_state(),
             #[cfg(all(feature = "wgpu", feature = "glow"))]
             wgpu_render_state: None,
-        });
+        };
+        let app = app_creator(&cc).map_err(|err| err.to_string())?;
 
         let frame = epi::Frame {
             info,
@@ -142,8 +147,6 @@ impl AppRunner {
             app,
             needs_repaint,
             last_save_time: now_sec(),
-            text_cursor_pos: None,
-            mutable_text_under_cursor: false,
             textures_delta: Default::default(),
             clipped_primitives: None,
 
@@ -188,6 +191,10 @@ impl AppRunner {
         self.last_save_time = now_sec();
     }
 
+    pub fn canvas(&self) -> &web_sys::OffscreenCanvas {
+        self.painter.canvas()
+    }
+
     pub fn destroy(mut self) {
         log::debug!("Destroying AppRunner");
         self.painter.destroy();
@@ -197,16 +204,32 @@ impl AppRunner {
         self.clipped_primitives.is_some()
     }
 
+    /*
+    pub fn update_focus(&mut self) {
+        let has_focus = self.has_focus();
+        if self.input.raw.focused != has_focus {
+            log::trace!("{} Focus changed to {has_focus}", self.canvas().id());
+            self.input.set_focus(has_focus);
+
+            if !has_focus {
+                // We lost focus - good idea to save
+                self.save();
+            }
+            self.egui_ctx().request_repaint();
+        }
+    }
+    */
+
     /// Runs the logic, but doesn't paint the result.
     ///
     /// The result can be painted later with a call to [`Self::run_and_paint`] or [`Self::paint`].
     pub fn logic(&mut self) {
-        let frame_start = now_sec();
-
-        let raw_input = self.input.new_frame(
+        let mut raw_input = self.input.new_frame(
             egui::vec2(self.painter.width as f32, self.painter.height as f32),
             self.painter.pixel_ratio,
         );
+
+        self.app.raw_input_hook(&self.egui_ctx, &mut raw_input);
 
         let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
             self.app.update(egui_ctx, &mut self.frame);
@@ -231,18 +254,18 @@ impl AppRunner {
             }
         }
 
-        self.mutable_text_under_cursor = platform_output.mutable_text_under_cursor;
+        self.worker_options.channels.zoom_tx.store(
+            self.egui_ctx.zoom_factor(),
+            portable_atomic::Ordering::Relaxed,
+        );
         self.worker_options
             .channels
             .send(super::WebRunnerOutput::PlatformOutput(
                 platform_output,
                 self.egui_ctx.options(|o| o.screen_reader),
-                self.egui_ctx.wants_keyboard_input(),
             ));
         self.textures_delta.append(textures_delta);
         self.clipped_primitives = Some(self.egui_ctx.tessellate(shapes, pixels_per_point));
-
-        self.frame.info.cpu_usage = Some((now_sec() - frame_start) as f32);
     }
 
     /// Paint the results of the last call to [`Self::logic`].
@@ -262,12 +285,18 @@ impl AppRunner {
         }
     }
 
+    pub fn report_frame_time(&mut self, cpu_usage_seconds: f32) {
+        self.frame.info.cpu_usage = Some(cpu_usage_seconds);
+    }
+
     pub(super) fn handle_platform_output(
         state: &super::MainState,
         platform_output: egui::PlatformOutput,
         screen_reader_enabled: bool,
-        wants_keyboard_input: bool,
     ) {
+        // We sometimes miss blur/focus events due to the text agent, so let's just poll each frame:
+        state.update_focus();
+
         #[cfg(feature = "web_screen_reader")]
         if screen_reader_enabled {
             super::screen_reader::speak(&platform_output.events_description());
@@ -279,9 +308,9 @@ impl AppRunner {
             cursor_icon,
             open_url,
             copied_text,
-            events: _, // already handled
-            mutable_text_under_cursor,
-            text_cursor_pos,
+            events: _,                    // already handled
+            mutable_text_under_cursor: _, // TODO(#4569): https://github.com/emilk/egui/issues/4569
+            ime,
             #[cfg(feature = "accesskit")]
                 accesskit_update: _, // not currently implemented
         } = platform_output;
@@ -299,15 +328,32 @@ impl AppRunner {
         #[cfg(not(web_sys_unstable_apis))]
         let _ = copied_text;
 
-        {
-            let mut inner = state.inner.borrow_mut();
-            inner.mutable_text_under_cursor = mutable_text_under_cursor;
-            inner.wants_keyboard_input = wants_keyboard_input;
+        // Can't have `inner` borrowed for the `text_agent` operations because apparently they
+        // yield to the asynchronous runtime
+        let has_focus = state.inner.borrow().has_focus;
 
-            if inner.text_cursor_pos != text_cursor_pos {
-                super::text_agent::move_text_cursor(text_cursor_pos, &state.canvas);
-                inner.text_cursor_pos = text_cursor_pos;
+        let text_agent = state
+            .text_agent
+            .get()
+            .expect("text agent should be initialized at this point");
+
+        if has_focus {
+            // The eframe app has focus.
+            if ime.is_some() {
+                // We are editing text: give the focus to the text agent.
+                text_agent.focus();
+            } else {
+                // We are not editing text - give the focus to the canvas.
+                text_agent.blur();
+                state.canvas.focus().ok();
             }
+        }
+
+        if let Err(err) = text_agent.move_to(ime, &state.canvas) {
+            log::error!(
+                "failed to update text agent position: {}",
+                super::string_from_js_value(&err)
+            );
         }
     }
 }

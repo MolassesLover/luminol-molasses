@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -14,12 +14,17 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with Luminol.  If not, see <http://www.gnu.org/licenses/>.
-use crate::{id, optional_id, optional_path, rpg::MoveRoute, BlendMode, ParameterType, Path};
+use crate::{
+    id_alox, id_serde, optional_id_alox, optional_id_serde, optional_path_alox,
+    optional_path_serde, rpg::MoveRoute, BlendMode, ParameterType, Path,
+};
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-#[serde(rename = "RPG::Event")]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(class = "RPG::Event")]
 pub struct Event {
-    // #[serde(with = "id")]
+    // #[serde(with = "id_serde")]
+    // #[marshal(with = "id_alox")]
     pub id: usize,
     pub name: String,
     pub x: i32,
@@ -27,6 +32,7 @@ pub struct Event {
     pub pages: Vec<EventPage>,
 
     #[serde(skip)]
+    #[marshal(skip)]
     pub extra_data: EventExtraData,
 }
 
@@ -34,6 +40,7 @@ pub struct Event {
 pub struct EventExtraData {
     /// Whether or not the event editor for this event is open
     pub is_editor_open: bool,
+    pub graphic_modified: std::cell::Cell<bool>,
 }
 
 impl Event {
@@ -52,9 +59,11 @@ impl Event {
 }
 
 #[derive(Default, Debug, serde::Deserialize, serde::Serialize, Clone)]
-#[serde(rename = "RPG::CommonEvent")]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(class = "RPG::CommonEvent")]
 pub struct CommonEvent {
-    #[serde(with = "id")]
+    #[serde(with = "id_serde")]
+    #[marshal(with = "id_alox")]
     pub id: usize,
     pub name: String,
     pub trigger: usize,
@@ -63,21 +72,92 @@ pub struct CommonEvent {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-#[serde(rename = "RPG::Event::Page")]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(class = "RPG::Event::Page")]
 pub struct EventPage {
     pub condition: EventCondition,
     pub graphic: Graphic,
-    pub move_type: usize,
-    pub move_speed: usize,
-    pub move_frequency: usize,
+    pub move_type: MoveType,
+    pub move_speed: MoveSpeed,
+    pub move_frequency: MoveFreq,
     pub move_route: MoveRoute,
     pub walk_anime: bool,
     pub step_anime: bool,
     pub direction_fix: bool,
     pub through: bool,
     pub always_on_top: bool,
-    pub trigger: i32,
+    pub trigger: EventTrigger,
     pub list: Vec<EventCommand>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
+#[derive(strum::Display, strum::EnumIter)]
+#[serde(try_from = "u8", into = "u8")]
+#[marshal(try_from = "u8", into = "u8")]
+#[repr(u8)]
+pub enum EventTrigger {
+    #[strum(to_string = "Action Button")]
+    ActionButton,
+    #[strum(to_string = "Player Touch")]
+    PlayerTouch,
+    #[strum(to_string = "Event Touch")]
+    EventTouch,
+    #[strum(to_string = "Autorun")]
+    Autorun,
+    #[strum(to_string = "Parallel Process")]
+    Parallel,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
+#[derive(strum::Display, strum::EnumIter)]
+#[serde(try_from = "u8", into = "u8")]
+#[marshal(try_from = "u8", into = "u8")]
+#[repr(u8)]
+pub enum MoveType {
+    Fixed,
+    Random,
+    Approach,
+    Custom,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
+#[derive(strum::Display, strum::EnumIter)]
+#[serde(try_from = "u8", into = "u8")]
+#[marshal(try_from = "u8", into = "u8")]
+#[repr(u8)]
+pub enum MoveFreq {
+    Lowest = 1,
+    Lower,
+    Low,
+    High,
+    Higher,
+    Highest,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
+#[derive(strum::Display, strum::EnumIter)]
+#[serde(try_from = "u8", into = "u8")]
+#[marshal(try_from = "u8", into = "u8")]
+#[repr(u8)]
+pub enum MoveSpeed {
+    Slowest = 1,
+    Slower,
+    Slow,
+    Fast,
+    Faster,
+    Fastest,
 }
 
 impl Default for EventPage {
@@ -85,27 +165,30 @@ impl Default for EventPage {
         Self {
             condition: EventCondition::default(),
             graphic: Graphic::default(),
-            move_type: 0,
-            move_speed: 3,
-            move_frequency: 3,
+            move_type: MoveType::Fixed,
+            move_speed: MoveSpeed::Slow,
+            move_frequency: MoveFreq::Low,
             move_route: MoveRoute::default(),
             walk_anime: true,
             step_anime: false,
             direction_fix: false,
             through: false,
             always_on_top: false,
-            trigger: 0,
+            trigger: EventTrigger::ActionButton,
             list: vec![],
         }
     }
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-#[serde(rename = "RPG::Event::Page::Graphic")]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(class = "RPG::Event::Page::Graphic")]
 pub struct Graphic {
-    #[serde(with = "optional_id")]
+    #[serde(with = "optional_id_serde")]
+    #[marshal(with = "optional_id_alox")]
     pub tile_id: Option<usize>,
-    #[serde(with = "optional_path")]
+    #[serde(with = "optional_path_serde")]
+    #[marshal(with = "optional_path_alox")]
     pub character_name: Path,
     pub character_hue: i32,
     pub direction: i32,
@@ -129,19 +212,24 @@ impl Default for Graphic {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-#[serde(rename = "RPG::Event::Page::Condition")]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(class = "RPG::Event::Page::Condition")]
 pub struct EventCondition {
     pub switch1_valid: bool,
     pub switch2_valid: bool,
     pub variable_valid: bool,
     pub self_switch_valid: bool,
-    #[serde(with = "id")]
+    #[serde(with = "id_serde")]
+    #[marshal(with = "id_alox")]
     pub switch1_id: usize,
-    #[serde(with = "id")]
+    #[serde(with = "id_serde")]
+    #[marshal(with = "id_alox")]
     pub switch2_id: usize,
+    #[serde(with = "id_serde")]
+    #[marshal(with = "id_alox")]
     pub variable_id: usize,
     pub variable_value: i32,
-    pub self_switch_ch: String,
+    pub self_switch_ch: SelfSwitch,
 }
 
 impl Default for EventCondition {
@@ -155,19 +243,58 @@ impl Default for EventCondition {
             switch2_id: 0,
             variable_id: 0,
             variable_value: 0,
-            self_switch_ch: "A".to_string(),
+            self_switch_ch: SelfSwitch::A,
+        }
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(strum::Display, strum::EnumIter)]
+#[serde(from = "String", into = "String")]
+#[marshal(from = "String", into = "String")]
+pub enum SelfSwitch {
+    A,
+    B,
+    C,
+    D,
+}
+
+impl From<String> for SelfSwitch {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "A" => Self::A,
+            "B" => Self::B,
+            "C" => Self::C,
+            "D" => Self::D,
+            _ => panic!("wrong value for self switch"),
+        }
+    }
+}
+
+impl From<SelfSwitch> for String {
+    fn from(val: SelfSwitch) -> Self {
+        match val {
+            SelfSwitch::A => "A".to_string(),
+            SelfSwitch::B => "B".to_string(),
+            SelfSwitch::C => "C".to_string(),
+            SelfSwitch::D => "D".to_string(),
         }
     }
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
 #[allow(missing_docs)]
-#[serde(rename = "RPG::EventCommand")]
+#[marshal(class = "RPG::EventCommand")]
 pub struct EventCommand {
     pub code: u16,
     pub indent: usize,
     pub parameters: Vec<ParameterType>,
 
+    #[marshal(default = "rand::random")]
+    #[marshal(skip)]
     #[serde(default = "rand::random")]
     #[serde(skip)]
     pub guid: u16,

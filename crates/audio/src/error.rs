@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -36,4 +36,4 @@ pub enum Error {
     FileSystem(#[from] luminol_filesystem::Error),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub use color_eyre::Result;

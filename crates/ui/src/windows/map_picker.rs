@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -94,6 +94,14 @@ impl luminol_core::Window for Window {
             .open(&mut window_open)
             .show(ctx, |ui| {
                 egui::ScrollArea::both()
+                    .id_source(
+                        update_state
+                            .project_config
+                            .as_ref()
+                            .expect("project not loaded")
+                            .project
+                            .persistence_id,
+                    )
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         // Aquire the data cache.
@@ -134,7 +142,10 @@ impl luminol_core::Window for Window {
                         if let Some(id) = open_map_id {
                             match crate::tabs::map::Tab::new(id, update_state) {
                                 Ok(tab) => update_state.edit_tabs.add_tab(tab),
-                                Err(e) => update_state.toasts.error(e.to_string()),
+                                Err(e) => luminol_core::error!(
+                                    update_state.toasts,
+                                    e.wrap_err("Error enumerating maps")
+                                ),
                             }
                         }
                     })

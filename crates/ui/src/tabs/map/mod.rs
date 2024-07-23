@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -85,6 +85,15 @@ pub struct Tab {
     /// This stores the passage values for every position on the map so that we can figure out
     /// which passage values have changed in the current frame
     passages: luminol_data::Table2,
+
+    /// Brush density between 0 and 1 inclusive; determines the proportion of randomly chosen tiles
+    /// the brush draws on if less than 1
+    brush_density: f32,
+    /// Seed for the PRNG used for the brush when brush density is less than 1
+    brush_seed: [u8; 16],
+
+    /// Asynchronous task used to save the map as an image file
+    save_as_image_promise: Option<poll_promise::Promise<color_eyre::Result<()>>>,
 }
 
 // TODO: If we add support for changing event IDs, these need to be added as history entries
@@ -102,7 +111,7 @@ enum HistoryEntry {
     /// Contains a deleted event and its corresponding graphic.
     EventDeleted {
         event: luminol_data::rpg::Event,
-        sprites: Option<(luminol_graphics::Event, luminol_graphics::Event)>,
+        sprite: Option<luminol_graphics::Event>,
     },
 }
 
@@ -111,20 +120,22 @@ impl Tab {
     pub fn new(
         id: usize,
         update_state: &mut luminol_core::UpdateState<'_>,
-    ) -> anyhow::Result<Self> {
+    ) -> color_eyre::Result<Self> {
         // *sigh*
         // borrow checker.
         let view = luminol_components::MapView::new(update_state, id)?;
         let tilepicker = luminol_components::Tilepicker::new(update_state, id)?;
 
-        let map = update_state
-            .data
-            .get_or_load_map(id, update_state.filesystem);
+        let map = update_state.data.get_or_load_map(
+            id,
+            update_state.filesystem,
+            update_state.project_config.as_ref().unwrap(),
+        );
         let tilesets = update_state.data.tilesets();
         let tileset = &tilesets.data[map.tileset_id];
 
         let mut passages = luminol_data::Table2::new(map.data.xsize(), map.data.ysize());
-        luminol_graphics::collision::calculate_passages(
+        luminol_graphics::Collision::calculate_passages(
             &tileset.passages,
             &tileset.priorities,
             &map.data,
@@ -132,6 +143,18 @@ impl Tab {
             (0..map.data.zsize()).rev(),
             |x, y, passage| passages[(x, y)] = passage,
         );
+
+        let mut brush_seed = [0u8; 16];
+        brush_seed[0..8].copy_from_slice(
+            &update_state
+                .project_config
+                .as_ref()
+                .expect("project not loaded")
+                .project
+                .persistence_id
+                .to_le_bytes(),
+        );
+        brush_seed[8..16].copy_from_slice(&(id as u64).to_le_bytes());
 
         Ok(Self {
             id,
@@ -157,6 +180,11 @@ impl Tab {
             tilemap_undo_cache_layer: 0,
 
             passages,
+
+            brush_density: 1.,
+            brush_seed,
+
+            save_as_image_promise: None,
         })
     }
 }
@@ -190,98 +218,131 @@ impl luminol_core::Tab for Tab {
         update_state: &mut luminol_core::UpdateState<'_>,
         is_focused: bool,
     ) {
+        self.brush_density = update_state.toolbar.brush_density;
+
         // Display the toolbar.
+        // FIXME: find a proper place for this toolbar! it looks very out of place right now.
         egui::TopBottomPanel::top(format!("map_{}_toolbar", self.id)).show_inside(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    egui::Slider::new(&mut self.view.scale, 15.0..=300.)
-                        .text("Scale")
-                        .logarithmic(true)
-                        .fixed_decimals(0),
-                );
+            egui::Frame::none()
+                .outer_margin(egui::Margin {
+                    bottom: ui.spacing().item_spacing.y,
+                    ..egui::Margin::ZERO
+                })
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(
+                            egui::Slider::new(&mut self.view.scale, 15.0..=300.)
+                                .text("Scale")
+                                .logarithmic(true)
+                                .fixed_decimals(0),
+                        );
 
-                ui.separator();
+                        ui.separator();
 
-                ui.menu_button(
-                    // Format the text based on what layer is selected.
-                    match self.view.selected_layer {
-                        luminol_components::SelectedLayer::Events => "Events ⏷".to_string(),
-                        luminol_components::SelectedLayer::Tiles(layer) => {
-                            format!("Layer {} ⏷", layer + 1)
-                        }
-                    },
-                    |ui| {
-                        // TODO: Add layer enable button
-                        // Display all layers.
-                        egui::Grid::new(self.id().with("layer_select"))
-                            .striped(true)
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new("Panorama").underline());
-                                ui.checkbox(&mut self.view.map.pano_enabled, "👁");
-                                ui.end_row();
-
-                                for (index, layer) in
-                                    self.view.map.enabled_layers.iter_mut().enumerate()
-                                {
-                                    ui.columns(1, |columns| {
-                                        columns[0].selectable_value(
-                                            &mut self.view.selected_layer,
-                                            luminol_components::SelectedLayer::Tiles(index),
-                                            format!("Layer {}", index + 1),
-                                        );
-                                    });
-                                    ui.checkbox(layer, "👁");
-                                    ui.end_row();
+                        ui.menu_button(
+                            // Format the text based on what layer is selected.
+                            match self.view.selected_layer {
+                                luminol_components::SelectedLayer::Events => "Events ⏷".to_string(),
+                                luminol_components::SelectedLayer::Tiles(layer) => {
+                                    format!("Layer {} ⏷", layer + 1)
                                 }
+                            },
+                            |ui| {
+                                // TODO: Add layer enable button
+                                // Display all layers.
+                                egui::Grid::new(self.id().with("layer_select"))
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("Panorama").underline());
+                                        ui.checkbox(&mut self.view.map.pano_enabled, "👁");
+                                        ui.end_row();
 
-                                // Display event layer.
-                                ui.columns(1, |columns| {
-                                    columns[0].selectable_value(
-                                        &mut self.view.selected_layer,
-                                        luminol_components::SelectedLayer::Events,
-                                        egui::RichText::new("Events").italics(),
-                                    );
-                                });
-                                ui.checkbox(&mut self.view.event_enabled, "👁");
-                                ui.end_row();
+                                        for (index, layer) in self
+                                            .view
+                                            .map
+                                            .tiles
+                                            .enabled_layers
+                                            .iter_mut()
+                                            .enumerate()
+                                        {
+                                            ui.columns(1, |columns| {
+                                                columns[0].selectable_value(
+                                                    &mut self.view.selected_layer,
+                                                    luminol_components::SelectedLayer::Tiles(index),
+                                                    format!("Layer {}", index + 1),
+                                                );
+                                            });
+                                            ui.checkbox(layer, "👁");
+                                            ui.end_row();
+                                        }
 
-                                ui.label(egui::RichText::new("Fog").underline());
-                                ui.checkbox(&mut self.view.map.fog_enabled, "👁");
-                                ui.end_row();
+                                        // Display event layer.
+                                        ui.columns(1, |columns| {
+                                            columns[0].selectable_value(
+                                                &mut self.view.selected_layer,
+                                                luminol_components::SelectedLayer::Events,
+                                                egui::RichText::new("Events").italics(),
+                                            );
+                                        });
+                                        ui.checkbox(&mut self.view.map.event_enabled, "👁");
+                                        ui.end_row();
 
-                                ui.label(egui::RichText::new("Collision").underline());
-                                ui.checkbox(&mut self.view.map.coll_enabled, "👁");
-                                ui.end_row();
-                            });
-                    },
-                );
+                                        ui.label(egui::RichText::new("Fog").underline());
+                                        ui.checkbox(&mut self.view.map.fog_enabled, "👁");
+                                        ui.end_row();
 
-                ui.separator();
+                                        ui.label(egui::RichText::new("Collision").underline());
+                                        ui.checkbox(&mut self.view.map.coll_enabled, "👁");
+                                        ui.end_row();
 
-                ui.checkbox(&mut self.view.visible_display, "Display Visible Area")
-                    .on_hover_text("Display the visible area in-game (640x480)");
-                ui.checkbox(&mut self.view.move_preview, "Preview event move routes")
-                    .on_hover_text("Preview event page move routes");
-                ui.checkbox(&mut self.view.snap_to_grid, "Snap to grid")
-                    .on_hover_text("Snap's the viewport to the tile grid");
-                ui.checkbox(
-                    &mut self.view.darken_unselected_layers,
-                    "Darken unselected layers",
-                )
-                .on_disabled_hover_text("Toggles darkening unselected layers");
+                                        ui.label(egui::RichText::new("Grid").underline());
+                                        ui.checkbox(&mut self.view.map.grid_enabled, "👁");
+                                        ui.end_row();
+                                    });
+                            },
+                        );
 
-                /*
-                if ui.button("Save map preview").clicked() {
-                    self.tilemap.save_to_disk();
-                }
+                        ui.separator();
 
-                if map.preview_move_route.is_some()
-                && ui.button("Clear move route preview").clicked()
-                {
-                    map.preview_move_route = None;
-                }
-                */
-            });
+                        ui.menu_button("Display options ⏷", |ui| {
+                            ui.checkbox(&mut self.view.visible_display, "Display visible area")
+                                .on_hover_text("Display the visible area in-game (640x480)");
+                            ui.checkbox(&mut self.view.move_preview, "Preview event move routes")
+                                .on_hover_text("Preview event page move routes");
+                            ui.checkbox(&mut self.view.snap_to_grid, "Snap to grid")
+                                .on_hover_text("Snaps the viewport to the tile grid");
+                            ui.checkbox(
+                                &mut self.view.darken_unselected_layers,
+                                "Darken unselected layers",
+                            )
+                            .on_hover_text("Toggles darkening unselected layers");
+                            ui.checkbox(&mut self.view.display_tile_ids, "Display tile IDs")
+                                .on_disabled_hover_text(
+                                    "Display the tile IDs of the currently selected layer",
+                                );
+                        });
+
+                        ui.separator();
+
+                        if ui.button("Save map preview").clicked()
+                            && self.save_as_image_promise.is_none()
+                        {
+                            self.save_as_image_promise =
+                                Some(luminol_core::spawn_future(self.view.save_as_image(
+                                    &update_state.graphics,
+                                    &update_state.data.get_map(self.id),
+                                )))
+                        }
+
+                        /*
+                        if map.preview_move_route.is_some()
+                        && ui.button("Clear move route preview").clicked()
+                        {
+                            map.preview_move_route = None;
+                        }
+                        */
+                    });
+                });
         });
 
         // Display the tilepicker.
@@ -291,11 +352,21 @@ impl luminol_core::Tab for Tab {
             .default_width(tilepicker_default_width)
             .max_width(tilepicker_default_width)
             .show_inside(ui, |ui| {
-                egui::ScrollArea::both().show_viewport(ui, |ui, rect| {
-                    self.tilepicker
-                        .ui(update_state, ui, rect, self.view.map.coll_enabled);
-                    ui.separator();
-                });
+                egui::ScrollArea::both()
+                    .id_source(
+                        update_state
+                            .project_config
+                            .as_ref()
+                            .expect("project not loaded")
+                            .project
+                            .persistence_id,
+                    )
+                    .show_viewport(ui, |ui, rect| {
+                        self.tilepicker.view.coll_enabled = self.view.map.coll_enabled;
+                        self.tilepicker.view.grid_enabled = self.view.map.grid_enabled;
+                        self.tilepicker.ui(update_state, ui, rect);
+                        ui.separator();
+                    });
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -315,7 +386,7 @@ impl luminol_core::Tab for Tab {
 
                 let response = self.view.ui(
                     ui,
-                    &update_state.graphics,
+                    update_state,
                     &map,
                     &self.tilepicker,
                     self.event_drag_info.is_some(),
@@ -363,7 +434,9 @@ impl luminol_core::Tab for Tab {
                     }
                 }
 
-                if !response.dragged_by(egui::PointerButton::Primary) {
+                if !response.is_pointer_button_down_on()
+                    || ui.input(|i| !i.pointer.button_down(egui::PointerButton::Primary))
+                {
                     if self.drawing_shape {
                         self.drawing_shape = false;
                     }
@@ -392,21 +465,20 @@ impl luminol_core::Tab for Tab {
                 if let luminol_components::SelectedLayer::Tiles(tile_layer) =
                     self.view.selected_layer
                 {
-                    // Before drawing tiles, save the state of the current layer so we can undo it
-                    // later if we need to
-                    if response.drag_started_by(egui::PointerButton::Primary)
-                        && !ui.input(|i| i.modifiers.command)
-                    {
-                        self.tilemap_undo_cache_layer = tile_layer;
-                        for i in 0..self.layer_cache.len() {
-                            self.tilemap_undo_cache[i] = self.layer_cache[i];
-                        }
-                    }
-
                     // Tile drawing
-                    if response.dragged_by(egui::PointerButton::Primary)
-                        && !ui.input(|i| i.modifiers.command)
+                    if response.is_pointer_button_down_on()
+                        && ui.input(|i| {
+                            i.pointer.button_down(egui::PointerButton::Primary)
+                                && !i.modifiers.command
+                        })
                     {
+                        if self.drawing_shape_pos.is_none() {
+                            // Before drawing tiles, save the state of the current layer so we can
+                            // undo it later if we need to
+                            self.tilemap_undo_cache_layer = tile_layer;
+                            self.tilemap_undo_cache.copy_from_slice(&self.layer_cache);
+                        }
+
                         self.handle_brush(
                             map_x as usize,
                             map_y as usize,
@@ -421,19 +493,24 @@ impl luminol_core::Tab for Tab {
                     {
                         // Double-click/press enter on events to edit them
                         if ui.input(|i| !i.modifiers.command) {
-                            self.event_windows
-                                .add_window(event_edit::Window::new(selected_event_id, self.id));
+                            let event = map.events[selected_event_id].clone();
+                            self.event_windows.add_window(event_edit::Window::new(
+                                update_state,
+                                &event,
+                                self.id,
+                                map.tileset_id,
+                            ));
                         }
                     }
 
                     // Press delete or backspace to delete the selected event
                     if is_delete_pressed {
                         let event = map.events.remove(selected_event_id);
-                        let sprites = self.view.events.try_remove(selected_event_id).ok();
+                        let sprite = self.view.map.events.try_remove(selected_event_id).ok();
                         self.push_to_history(
                             update_state,
                             &mut map,
-                            HistoryEntry::EventDeleted { event, sprites },
+                            HistoryEntry::EventDeleted { event, sprite },
                         );
                     }
 
@@ -494,7 +571,7 @@ impl luminol_core::Tab for Tab {
                     if response.double_clicked()
                         || (is_focused && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                     {
-                        if let Some(id) = self.add_event(&mut map) {
+                        if let Some(id) = self.add_event(update_state, &mut map) {
                             self.push_to_history(
                                 update_state,
                                 &mut map,
@@ -553,15 +630,15 @@ impl luminol_core::Tab for Tab {
 
                         Some(HistoryEntry::EventCreated(id)) => {
                             let event = map.events.remove(id);
-                            let sprites = self.view.events.try_remove(id).ok();
-                            Some(HistoryEntry::EventDeleted { event, sprites })
+                            let sprite = self.view.map.events.try_remove(id).ok();
+                            Some(HistoryEntry::EventDeleted { event, sprite })
                         }
 
-                        Some(HistoryEntry::EventDeleted { event, sprites }) => {
+                        Some(HistoryEntry::EventDeleted { event, sprite }) => {
                             let id = event.id;
                             map.events.insert(id, event);
-                            if let Some(sprites) = sprites {
-                                self.view.events.insert(id, sprites);
+                            if let Some(sprite) = sprite {
+                                self.view.map.events.insert(id, sprite);
                             }
                             Some(HistoryEntry::EventCreated(id))
                         }
@@ -602,17 +679,17 @@ impl luminol_core::Tab for Tab {
                 }
 
                 // Update the collision preview
-                luminol_graphics::collision::calculate_passages(
+                luminol_graphics::Collision::calculate_passages(
                     &tileset.passages,
                     &tileset.priorities,
                     &map.data,
-                    if self.view.event_enabled {
+                    if self.view.map.event_enabled {
                         Some(&map.events)
                     } else {
                         None
                     },
                     (0..map.data.zsize())
-                        .filter(|&i| self.view.map.enabled_layers[i])
+                        .filter(|&i| self.view.map.tiles.enabled_layers[i])
                         .rev(),
                     |x, y, passage| {
                         if self.passages[(x, y)] != passage {
@@ -629,6 +706,22 @@ impl luminol_core::Tab for Tab {
         });
 
         self.event_windows.display(ui.ctx(), update_state);
+
+        if let Some(p) = self.save_as_image_promise.take() {
+            match p.try_take() {
+                Ok(Ok(())) => {}
+                Ok(Err(error))
+                    if !matches!(
+                        error.root_cause().downcast_ref(),
+                        Some(luminol_filesystem::Error::CancelledLoading)
+                    ) =>
+                {
+                    luminol_core::error!(update_state.toasts, error);
+                }
+                Ok(Err(_)) => {}
+                Err(p) => self.save_as_image_promise = Some(p),
+            }
+        }
     }
 
     fn requires_filesystem(&self) -> bool {

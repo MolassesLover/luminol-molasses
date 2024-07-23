@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -22,20 +22,23 @@
 // terms of the Steamworks API by Valve Corporation, the licensors of this
 // Program grant you additional permission to convey the resulting work.
 
+use alox_48::Value;
+
 use crate::rgss_structs::{Color, Tone};
 use crate::shared::{AudioFile, MoveCommand, MoveRoute};
 
-#[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(from = "alox_48::Value", into = "alox_48::Value")] // TODO make this serde compatible
 #[allow(missing_docs)]
-#[serde(from = "alox_48::Value")]
-#[serde(into = "alox_48::Value")]
 pub enum ParameterType {
     Integer(i32),
     String(String),
     Color(Color),
     Tone(Tone),
     AudioFile(AudioFile),
-    Float(f32),
+    Float(f64),
     MoveRoute(MoveRoute),
     MoveCommand(MoveCommand),
     Array(Vec<ParameterType>),
@@ -45,28 +48,29 @@ pub enum ParameterType {
     None,
 }
 
+// FIXME this really should be try_from and try_into
 impl From<alox_48::Value> for ParameterType {
     fn from(value: alox_48::Value) -> Self {
         match value {
-            alox_48::Value::Integer(i) => Self::Integer(i as _),
-            alox_48::Value::String(str) => Self::String(str.to_string_lossy().into_owned()),
-            alox_48::Value::Object(obj) if obj.class == "RPG::AudioFile" => {
-                Self::AudioFile(obj.into())
-            }
-            alox_48::Value::Object(obj) if obj.class == "RPG::MoveRoute" => {
-                Self::MoveRoute(obj.into())
-            }
-            alox_48::Value::Object(obj) if obj.class == "RPG::MoveCommand" => {
-                Self::MoveCommand(obj.into())
-            }
-            alox_48::Value::Float(f) => Self::Float(f as _),
-            alox_48::Value::Array(ary) => Self::Array(ary.into_iter().map(|v| v.into()).collect()),
-            alox_48::Value::Bool(b) => Self::Bool(b),
-            alox_48::Value::Userdata(data) if data.class == "Color" => {
-                Self::Color(Color::from(data))
-            }
-            alox_48::Value::Userdata(data) if data.class == "Tone" => Self::Tone(Tone::from(data)),
-            _ => panic!("Unexpected type {value:#?}"),
+            Value::Nil => Self::None,
+            Value::Integer(v) => Self::Integer(v),
+            Value::Float(v) => Self::Float(v),
+            Value::String(v) => Self::String(String::from_utf8(v.data).unwrap()),
+            Value::Array(v) => Self::Array(v.into_iter().map(|v| v.into()).collect()),
+            Value::Bool(v) => Self::Bool(v),
+            Value::Userdata(userdata) => match userdata.class.as_str() {
+                "Color" => Self::Color(Color::from(userdata)),
+                "Tone" => Self::Tone(Tone::from(userdata)),
+                _ => panic!("Unsupported userdata type: {:#?}", userdata),
+            },
+            Value::Object(alox_48::Object { ref class, .. }) => match class.as_str() {
+                "RPG::AudioFile" => Self::AudioFile(alox_48::from_value(&value).unwrap()),
+                "RPG::MoveRoute" => Self::MoveRoute(alox_48::from_value(&value).unwrap()),
+                "RPG::MoveCommand" => Self::MoveCommand(alox_48::from_value(&value).unwrap()),
+                _ => panic!("Unsupported object type: {:#?}", value),
+            },
+            Value::Instance(i) => (*i.value).into(),
+            _ => panic!("Unsupported value type: {:#?}", value),
         }
     }
 }
@@ -74,21 +78,17 @@ impl From<alox_48::Value> for ParameterType {
 impl From<ParameterType> for alox_48::Value {
     fn from(value: ParameterType) -> Self {
         match value {
-            ParameterType::Integer(i) => alox_48::Value::Integer(i as _),
-            ParameterType::String(s) => alox_48::Value::String(s.into()),
-            ParameterType::Color(c) => c.into(),
-            ParameterType::Tone(t) => t.into(),
-            ParameterType::Float(f) => alox_48::Value::Float(f as _),
-            ParameterType::Array(a) => {
-                alox_48::Value::Array(a.into_iter().map(Into::into).collect())
-            }
-            ParameterType::Bool(b) => alox_48::Value::Bool(b),
-
-            ParameterType::MoveRoute(r) => alox_48::Value::Object(r.into()),
-            ParameterType::MoveCommand(c) => alox_48::Value::Object(c.into()),
-            ParameterType::AudioFile(a) => alox_48::Value::Object(a.into()),
-
-            ParameterType::None => alox_48::Value::Nil,
+            ParameterType::None => Value::Nil,
+            ParameterType::Integer(v) => Value::Integer(v),
+            ParameterType::Float(v) => Value::Float(v),
+            ParameterType::String(v) => Value::String(v.into()),
+            ParameterType::Array(v) => Value::Array(v.into_iter().map(|v| v.into()).collect()),
+            ParameterType::Bool(v) => Value::Bool(v),
+            ParameterType::Color(v) => Value::Userdata(v.into()),
+            ParameterType::Tone(v) => Value::Userdata(v.into()),
+            ParameterType::AudioFile(v) => alox_48::to_value(v).unwrap(),
+            ParameterType::MoveRoute(v) => alox_48::to_value(v).unwrap(),
+            ParameterType::MoveCommand(v) => alox_48::to_value(v).unwrap(),
         }
     }
 }
@@ -186,7 +186,7 @@ variant_impl! {
     Color, Color,
     Tone, Tone,
     AudioFile, AudioFile,
-    Float, f32,
+    Float, f64,
     MoveRoute, MoveRoute,
     MoveCommand, MoveCommand,
     Array, Vec<ParameterType>,

@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -14,53 +14,26 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with Luminol.  If not, see <http://www.gnu.org/licenses/>.
-use crate::{optional_path, Path};
+use crate::{optional_path_alox, optional_path_serde, Path};
 
-#[derive(Default, Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq)]
-#[serde(rename = "RPG::AudioFile")]
+#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(class = "RPG::AudioFile")]
 pub struct AudioFile {
-    #[serde(with = "optional_path")]
+    #[serde(with = "optional_path_serde")]
+    #[marshal(with = "optional_path_alox")]
     pub name: Path,
     pub volume: u8,
     pub pitch: u8,
 }
 
-impl From<alox_48::Object> for AudioFile {
-    fn from(obj: alox_48::Object) -> Self {
-        let name = obj.fields["name"]
-            .clone()
-            .into_string()
-            .unwrap()
-            .to_string()
-            .unwrap();
-        let name = if name.is_empty() {
-            None
-        } else {
-            Some(name.into())
-        };
-        AudioFile {
-            name,
-            volume: obj.fields["volume"].clone().into_integer().unwrap() as _,
-            pitch: obj.fields["pitch"].clone().into_integer().unwrap() as _,
-        }
-    }
-}
-
-impl From<AudioFile> for alox_48::Object {
-    fn from(a: AudioFile) -> Self {
-        let mut fields = alox_48::value::RbFields::with_capacity(3);
-        fields.insert(
-            "name".into(),
-            a.name
-                .map_or("".into(), camino::Utf8PathBuf::into_string)
-                .into(),
-        );
-        fields.insert("volume".into(), alox_48::Value::Integer(a.volume as _));
-        fields.insert("pitch".into(), alox_48::Value::Integer(a.pitch as _));
-
-        alox_48::Object {
-            class: "RPG::AudioFile".into(),
-            fields,
+impl Default for AudioFile {
+    fn default() -> Self {
+        Self {
+            name: None,
+            volume: 100,
+            pitch: 100,
         }
     }
 }

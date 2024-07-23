@@ -1,10 +1,11 @@
 //! Common tools used by [`super::glow_integration`] and [`super::wgpu_integration`].
 
-use std::time::Instant;
+use web_time::Instant;
 
+use std::path::PathBuf;
 use winit::event_loop::EventLoopWindowTarget;
 
-use raw_window_handle::{HasRawDisplayHandle as _, HasRawWindowHandle as _};
+use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
 
 use egui::{DeferredViewportUiCallback, NumExt as _, ViewportBuilder, ViewportId};
 use egui_winit::{EventResponse, WindowSettings};
@@ -21,27 +22,41 @@ pub fn viewport_builder<E>(
 
     let mut viewport_builder = native_options.viewport.clone();
 
+    // On some Linux systems, a window size larger than the monitor causes crashes,
+    // and on Windows the window does not appear at all.
+    let clamp_size_to_monitor_size = viewport_builder.clamp_size_to_monitor_size.unwrap_or(true);
+
     // Always use the default window size / position on iOS. Trying to restore the previous position
     // causes the window to be shown too small.
     #[cfg(not(target_os = "ios"))]
     let inner_size_points = if let Some(mut window_settings) = window_settings {
         // Restore pos/size from previous session
 
-        window_settings
-            .clamp_size_to_sane_values(largest_monitor_point_size(egui_zoom_factor, event_loop));
+        if clamp_size_to_monitor_size {
+            window_settings.clamp_size_to_sane_values(largest_monitor_point_size(
+                egui_zoom_factor,
+                event_loop,
+            ));
+        }
         window_settings.clamp_position_to_monitors(egui_zoom_factor, event_loop);
 
-        viewport_builder = window_settings.initialize_viewport_builder(viewport_builder);
+        viewport_builder = window_settings.initialize_viewport_builder(
+            egui_zoom_factor,
+            event_loop,
+            viewport_builder,
+        );
         window_settings.inner_size_points()
     } else {
         if let Some(pos) = viewport_builder.position {
             viewport_builder = viewport_builder.with_position(pos);
         }
 
-        if let Some(initial_window_size) = viewport_builder.inner_size {
-            let initial_window_size = initial_window_size
-                .at_most(largest_monitor_point_size(egui_zoom_factor, event_loop));
-            viewport_builder = viewport_builder.with_inner_size(initial_window_size);
+        if clamp_size_to_monitor_size {
+            if let Some(initial_window_size) = viewport_builder.inner_size {
+                let initial_window_size = initial_window_size
+                    .at_most(largest_monitor_point_size(egui_zoom_factor, event_loop));
+                viewport_builder = viewport_builder.with_inner_size(initial_window_size);
+            }
         }
 
         viewport_builder.inner_size
@@ -119,6 +134,16 @@ pub fn create_storage(_app_name: &str) -> Option<Box<dyn epi::Storage>> {
     None
 }
 
+#[allow(clippy::unnecessary_wraps)]
+pub fn create_storage_with_file(_file: impl Into<PathBuf>) -> Option<Box<dyn epi::Storage>> {
+    #[cfg(feature = "persistence")]
+    return Some(Box::new(
+        super::file_storage::FileStorage::from_ron_filepath(_file),
+    ));
+    #[cfg(not(feature = "persistence"))]
+    None
+}
+
 // ----------------------------------------------------------------------------
 
 /// Everything needed to make a winit-based integration for [`epi`].
@@ -152,7 +177,10 @@ impl EpiIntegration {
         app_name: &str,
         native_options: &crate::NativeOptions,
         storage: Option<Box<dyn epi::Storage>>,
-        #[cfg(feature = "glow")] gl: Option<std::rc::Rc<glow::Context>>,
+        #[cfg(feature = "glow")] gl: Option<std::sync::Arc<glow::Context>>,
+        #[cfg(feature = "glow")] glow_register_native_texture: Option<
+            Box<dyn FnMut(glow::Texture) -> egui::TextureId>,
+        >,
         #[cfg(feature = "wgpu")] wgpu_render_state: Option<luminol_egui_wgpu::RenderState>,
     ) -> Self {
         let frame = epi::Frame {
@@ -163,10 +191,12 @@ impl EpiIntegration {
             storage,
             #[cfg(feature = "glow")]
             gl,
+            #[cfg(feature = "glow")]
+            glow_register_native_texture,
             #[cfg(feature = "wgpu")]
             wgpu_render_state,
-            raw_display_handle: window.raw_display_handle(),
-            raw_window_handle: window.raw_window_handle(),
+            raw_display_handle: window.display_handle().map(|h| h.as_raw()),
+            raw_window_handle: window.window_handle().map(|h| h.as_raw()),
         };
 
         let icon = native_options
@@ -231,7 +261,7 @@ impl EpiIntegration {
         &mut self,
         window: &winit::window::Window,
         egui_winit: &mut egui_winit::State,
-        event: &winit::event::WindowEvent<'_>,
+        event: &winit::event::WindowEvent,
     ) -> EventResponse {
         crate::profile_function!(egui_winit::short_window_event_description(event));
 
@@ -255,12 +285,10 @@ impl EpiIntegration {
             _ => {}
         }
 
-        egui_winit.update_pixels_per_point(&self.egui_ctx, window);
-        egui_winit.on_window_event(&self.egui_ctx, event)
+        egui_winit.on_window_event(window, event)
     }
 
     pub fn pre_update(&mut self) {
-        self.frame_start = Instant::now();
         self.app_icon_setter.update();
     }
 
@@ -276,6 +304,8 @@ impl EpiIntegration {
         raw_input.time = Some(self.beginning.elapsed().as_secs_f64());
 
         let close_requested = raw_input.viewport().close_requested();
+
+        app.raw_input_hook(&self.egui_ctx, &mut raw_input);
 
         let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
             if let Some(viewport_ui_cb) = viewport_ui_cb {
@@ -305,9 +335,8 @@ impl EpiIntegration {
         std::mem::take(&mut self.pending_full_output)
     }
 
-    pub fn post_update(&mut self) {
-        let frame_time = self.frame_start.elapsed().as_secs_f64() as f32;
-        self.frame.info.cpu_usage = Some(frame_time);
+    pub fn report_frame_time(&mut self, seconds: f32) {
+        self.frame.info.cpu_usage = Some(seconds);
     }
 
     pub fn post_rendering(&mut self, window: &winit::window::Window) {

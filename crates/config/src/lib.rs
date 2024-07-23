@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -18,6 +18,31 @@
 pub mod command_db;
 pub mod global;
 pub mod project;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod terminal;
+
+#[derive(Clone, Copy, Hash, PartialEq, Debug, Default)]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(strum::EnumIter, strum::Display)]
+pub enum DataFormat {
+    #[default]
+    #[strum(to_string = "Ruby Marshal")]
+    Marshal,
+    #[strum(to_string = "RON")]
+    Ron { pretty: bool },
+    #[strum(to_string = "JSON")]
+    Json { pretty: bool },
+}
+
+impl DataFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Marshal => "rxdata",
+            Self::Ron { .. } => "ron",
+            Self::Json { .. } => "json",
+        }
+    }
+}
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -19,7 +19,6 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(module = "/js/bindings.js")]
 extern "C" {
     pub fn worker() -> Option<web_sys::DedicatedWorkerGlobalScope>;
-    pub fn performance(worker: &web_sys::DedicatedWorkerGlobalScope) -> web_sys::Performance;
     pub fn filesystem_supported() -> bool;
     #[wasm_bindgen(catch)]
     async fn _show_directory_picker() -> Result<JsValue, JsValue>;
@@ -29,7 +28,8 @@ extern "C" {
         extensions: &js_sys::Array,
     ) -> Result<JsValue, JsValue>;
     pub fn dir_values(dir: &web_sys::FileSystemDirectoryHandle) -> js_sys::AsyncIterator;
-    async fn _request_permission(handle: &web_sys::FileSystemHandle) -> JsValue;
+    #[wasm_bindgen(catch)]
+    async fn _request_permission(handle: &web_sys::FileSystemHandle) -> Result<JsValue, JsValue>;
     pub fn cross_origin_isolated() -> bool;
 }
 
@@ -54,6 +54,9 @@ pub async fn show_file_picker(
         .map_err(|e| e.unchecked_into())
 }
 
-pub async fn request_permission(handle: &web_sys::FileSystemHandle) -> bool {
-    _request_permission(handle).await.is_truthy()
+pub async fn request_permission(handle: &web_sys::FileSystemHandle) -> Result<bool, js_sys::Error> {
+    _request_permission(handle)
+        .await
+        .map(|o| o.is_truthy())
+        .map_err(|e| e.unchecked_into())
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -35,12 +35,72 @@ pub use script::*;
     strum::EnumIter
 )]
 #[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
 #[repr(u8)]
 #[serde(into = "u8")]
 #[serde(try_from = "u8")]
+#[marshal(into = "u8")]
+#[marshal(try_from = "u8")]
 pub enum BlendMode {
     #[default]
     Normal = 0,
     Add = 1,
     Subtract = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+#[derive(
+    num_enum::TryFromPrimitive,
+    num_enum::IntoPrimitive,
+    strum::Display,
+    strum::EnumIter
+)]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[repr(u8)]
+#[serde(into = "u8")]
+#[serde(try_from = "u8")]
+#[marshal(into = "u8")]
+#[marshal(try_from = "u8")]
+pub enum Scope {
+    #[default]
+    None = 0,
+    #[strum(to_string = "One Enemy")]
+    OneEnemy = 1,
+    #[strum(to_string = "All Enemies")]
+    AllEnemies = 2,
+    #[strum(to_string = "One Ally")]
+    OneAlly = 3,
+    #[strum(to_string = "All Allies")]
+    AllAllies = 4,
+    #[strum(to_string = "One Ally (HP 0)")]
+    OneAllyHP0 = 5,
+    #[strum(to_string = "All Allies (HP 0)")]
+    AllAlliesHP0 = 6,
+    #[strum(to_string = "The User")]
+    User = 7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+#[derive(
+    num_enum::TryFromPrimitive,
+    num_enum::IntoPrimitive,
+    strum::Display,
+    strum::EnumIter
+)]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[repr(u8)]
+#[serde(into = "u8")]
+#[serde(try_from = "u8")]
+#[marshal(into = "u8")]
+#[marshal(try_from = "u8")]
+pub enum Occasion {
+    #[default]
+    Always = 0,
+    #[strum(to_string = "Only in battle")]
+    OnlyBattle = 1,
+    #[strum(to_string = "Only from the menu")]
+    OnlyMenu = 2,
+    Never = 3,
 }

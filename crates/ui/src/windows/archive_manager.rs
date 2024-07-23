@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -22,6 +22,7 @@
 // terms of the Steamworks API by Valve Corporation, the licensors of this
 // Program grant you additional permission to convey the resulting work.
 
+use luminol_components::UiExt;
 use luminol_filesystem::{File, FileSystem, OpenFlags};
 
 static CREATE_DEFAULT_SELECTED_DIRS: once_cell::sync::Lazy<
@@ -196,43 +197,28 @@ impl luminol_core::Window for Window {
 
                     self.show_inner(ui, update_state);
 
-                    ui.with_layout(
-                        egui::Layout {
-                            cross_justify: true,
-                            ..Default::default()
-                        },
-                        |ui| {
-                            ui.group(|ui| {
-                                ui.set_width(ui.available_width());
-                                ui.set_height(ui.available_height());
-                                egui::ScrollArea::both().show(ui, |ui| match &mut self.mode {
-                                    Mode::Extract { view, .. } => {
-                                        if let Some(v) = view {
-                                            v.ui(ui, update_state, None);
-                                        } else {
-                                            ui.add(
-                                                egui::Label::new("No archive chosen").wrap(false),
-                                            );
-                                        }
+                    ui.with_cross_justify(|ui| {
+                        ui.group(|ui| {
+                            ui.set_width(ui.available_width());
+                            ui.set_height(ui.available_height());
+                            egui::ScrollArea::both().show(ui, |ui| match &mut self.mode {
+                                Mode::Extract { view, .. } => {
+                                    if let Some(v) = view {
+                                        v.ui(ui, update_state, None);
+                                    } else {
+                                        ui.add(egui::Label::new("No archive chosen"));
                                     }
-                                    Mode::Create { view, .. } => {
-                                        if let Some(v) = view {
-                                            v.ui(
-                                                ui,
-                                                update_state,
-                                                Some(&CREATE_DEFAULT_SELECTED_DIRS),
-                                            );
-                                        } else {
-                                            ui.add(
-                                                egui::Label::new("No source folder chosen")
-                                                    .wrap(false),
-                                            );
-                                        }
+                                }
+                                Mode::Create { view, .. } => {
+                                    if let Some(v) = view {
+                                        v.ui(ui, update_state, Some(&CREATE_DEFAULT_SELECTED_DIRS));
+                                    } else {
+                                        ui.add(egui::Label::new("No source folder chosen"));
                                     }
-                                });
+                                }
                             });
-                        },
-                    );
+                        });
+                    });
                 });
             });
 
@@ -266,12 +252,21 @@ impl Window {
                                         name,
                                     ))
                                 }
-                                Err(e) => update_state.toasts.error(e.to_string()),
+                                Err(e) => luminol_core::error!(
+                                    update_state.toasts,
+                                    e.wrap_err("Error parsing archive contents")
+                                ),
                             }
                         }
                         Ok(Err(e)) => {
-                            if !matches!(e, luminol_filesystem::Error::CancelledLoading) {
-                                update_state.toasts.error(e.to_string())
+                            if !matches!(
+                                e.root_cause().downcast_ref(),
+                                Some(luminol_filesystem::Error::CancelledLoading)
+                            ) {
+                                luminol_core::error!(
+                                    update_state.toasts,
+                                    e.wrap_err("Unable to read archive file")
+                                );
                             }
                         }
                         Err(p) => *load_promise = Some(p),
@@ -285,12 +280,7 @@ impl Window {
                     || save_promise.is_none()
                 {
                     ui.columns(2, |columns| {
-                        columns[0].with_layout(
-                            egui::Layout {
-                                cross_align: egui::Align::Center,
-                                cross_justify: true,
-                                ..Default::default()
-                            },
+                        columns[0].with_cross_justify_center(
                             |ui| {
                                 if load_promise.is_none() && ui.button("Choose archive").clicked() {
                                     *load_promise = Some(luminol_core::spawn_future(
@@ -305,12 +295,7 @@ impl Window {
                             },
                         );
 
-                        columns[1].with_layout(
-                            egui::Layout {
-                                cross_align: egui::Align::Center,
-                                cross_justify: true,
-                                ..Default::default()
-                            },
+                        columns[1].with_cross_justify_center(
                             |ui| {
                                 if save_promise.is_none()
                                     && ui
@@ -350,7 +335,7 @@ impl Window {
                                                 Ok(())
                                             }));
                                         }
-                                        Err(e) => update_state.toasts.error(e.to_string()),
+                                        Err(e) => luminol_core::error!(update_state.toasts, e.wrap_err("Error enumerating files to extract from archive")),
                                     }
                                 } else if save_promise.is_some() {
                                     ui.spinner();
@@ -371,10 +356,18 @@ impl Window {
 
                 if let Some(p) = save_promise.take() {
                     match p.try_take() {
-                        Ok(Ok(())) => update_state.toasts.info("Extracted successfully!"),
+                        Ok(Ok(())) => {
+                            luminol_core::info!(update_state.toasts, "Extracted successfully!")
+                        }
                         Ok(Err(e)) => {
-                            if !matches!(e, luminol_filesystem::Error::CancelledLoading) {
-                                update_state.toasts.error(e.to_string())
+                            if !matches!(
+                                e.root_cause().downcast_ref(),
+                                Some(luminol_filesystem::Error::CancelledLoading)
+                            ) {
+                                luminol_core::error!(
+                                    update_state.toasts,
+                                    e.wrap_err("Error extracting archive")
+                                );
                             }
                         }
                         Err(p) => *save_promise = Some(p),
@@ -400,8 +393,14 @@ impl Window {
                             ));
                         }
                         Ok(Err(e)) => {
-                            if !matches!(e, luminol_filesystem::Error::CancelledLoading) {
-                                update_state.toasts.error(e.to_string())
+                            if !matches!(
+                                e.root_cause().downcast_ref(),
+                                Some(luminol_filesystem::Error::CancelledLoading)
+                            ) {
+                                luminol_core::error!(
+                                    update_state.toasts,
+                                    e.wrap_err("Unable to read contents of source directory"),
+                                );
                             }
                         }
                         Err(p) => *load_promise = Some(p),
@@ -426,12 +425,7 @@ impl Window {
                     || save_promise.is_none()
                 {
                     ui.columns(2, |columns| {
-                        columns[0].with_layout(
-                            egui::Layout {
-                                cross_align: egui::Align::Center,
-                                cross_justify: true,
-                                ..Default::default()
-                            },
+                        columns[0].with_cross_justify_center(
                             |ui| {
                                 if load_promise.is_none() && ui.button("Choose source folder").clicked()
                                 {
@@ -444,12 +438,7 @@ impl Window {
                             },
                         );
 
-                        columns[1].with_layout(
-                            egui::Layout {
-                                cross_align: egui::Align::Center,
-                                cross_justify: true,
-                                ..Default::default()
-                            },
+                        columns[1].with_cross_justify_center(
                             |ui| {
                                 if save_promise.is_none()
                                     && ui
@@ -481,7 +470,11 @@ impl Window {
 
                                                         let _ = luminol_filesystem::archiver::FileSystem::from_buffer_and_files(
                                                             &mut file,
-                                                            version,
+                                                            if version == 2 {
+                                                                1
+                                                            } else {
+                                                                version
+                                                            },
                                                             file_paths.iter().map(|path| {
                                                                 if is_first {
                                                                     is_first = false;
@@ -511,7 +504,7 @@ impl Window {
                                                         .await
                                                     }));
                                             }
-                                            Err(e) => update_state.toasts.error(e.to_string()),
+                                            Err(e) => luminol_core::error!(update_state.toasts, e.wrap_err("Error enumerating files to create archive from")),
                                         }
                                     }
                                 } else if save_promise.is_some() {
@@ -534,11 +527,20 @@ impl Window {
                 if let Some(p) = save_promise.take() {
                     match p.try_take() {
                         Ok(Ok(())) => {
-                            update_state.toasts.info("Created archive successfully!");
+                            luminol_core::info!(
+                                update_state.toasts,
+                                "Created archive successfully!"
+                            );
                         }
                         Ok(Err(e)) => {
-                            if !matches!(e, luminol_filesystem::Error::CancelledLoading) {
-                                update_state.toasts.error(e.to_string())
+                            if !matches!(
+                                e.root_cause().downcast_ref(),
+                                Some(luminol_filesystem::Error::CancelledLoading)
+                            ) {
+                                luminol_core::error!(
+                                    update_state.toasts,
+                                    e.wrap_err("Error creating archive")
+                                );
                             }
                         }
                         Err(p) => *save_promise = Some(p),
@@ -549,7 +551,7 @@ impl Window {
     }
 
     fn find_files(
-        view: &luminol_components::FileSystemView<impl luminol_filesystem::FileSystem>,
+        view: &luminol_components::FileSystemView<impl luminol_filesystem::ReadDir>,
     ) -> luminol_filesystem::Result<Vec<camino::Utf8PathBuf>> {
         let mut vec = Vec::new();
         for metadata in view {
@@ -565,7 +567,7 @@ impl Window {
 
     fn find_files_recurse(
         vec: &mut Vec<camino::Utf8PathBuf>,
-        src_fs: &impl luminol_filesystem::FileSystem,
+        src_fs: &impl luminol_filesystem::ReadDir,
         path: &camino::Utf8Path,
         is_file: bool,
     ) -> luminol_filesystem::Result<()> {

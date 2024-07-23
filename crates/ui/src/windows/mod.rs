@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -24,9 +24,14 @@
 
 /// The about window.
 pub mod about;
-pub mod appearance;
+/// The actor editor.
+pub mod actors;
 /// The archive manager for creating and extracting RGSSAD archives.
 pub mod archive_manager;
+/// The armor editor.
+pub mod armor;
+/// The class editor.
+pub mod classes;
 /// The common event editor.
 pub mod common_event_edit;
 /// Config window
@@ -34,9 +39,10 @@ pub mod config_window;
 /// Playtest console
 #[cfg(not(target_arch = "wasm32"))]
 pub mod console;
+/// The enemy editor.
+pub mod enemies;
 /// The event editor.
 pub mod event_edit;
-pub mod global_config_window;
 /// The item editor.
 pub mod items;
 /// The map picker.
@@ -45,7 +51,18 @@ pub mod map_picker;
 pub mod misc;
 /// New project window
 pub mod new_project;
+pub mod preferences;
+/// The crash reporter.
+pub mod reporter;
 /// The script editor
 pub mod script_edit;
+/// The script manager for creating and extracting Scripts.rxdata.
+pub mod script_manager;
+/// The skill editor.
+pub mod skills;
 /// The sound test.
 pub mod sound_test;
+/// The state editor.
+pub mod states;
+/// The weapon editor.
+pub mod weapons;

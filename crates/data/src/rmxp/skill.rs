@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -14,25 +14,34 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with Luminol.  If not, see <http://www.gnu.org/licenses/>.
-pub use crate::{id, id_vec, optional_id, optional_path, rpg::AudioFile, Path};
+pub use crate::{
+    id_alox, id_serde, id_vec_alox, id_vec_serde, optional_id_alox, optional_id_serde,
+    optional_path_alox, optional_path_serde, rpg::AudioFile, Path,
+};
 
 #[derive(Default, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(rename = "RPG::Skill")]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(class = "RPG::Skill")]
 pub struct Skill {
-    #[serde(with = "id")]
+    #[serde(with = "id_serde")]
+    #[marshal(with = "id_alox")]
     pub id: usize,
     pub name: String,
-    #[serde(with = "optional_path")]
+    #[serde(with = "optional_path_serde")]
+    #[marshal(with = "optional_path_alox")]
     pub icon_name: Path,
     pub description: String,
-    pub scope: i32,
-    pub occasion: Occasion,
-    #[serde(with = "optional_id")]
+    pub scope: crate::rpg::Scope,
+    pub occasion: crate::rpg::Occasion,
+    #[serde(with = "optional_id_serde")]
+    #[marshal(with = "optional_id_alox")]
     pub animation1_id: Option<usize>,
-    #[serde(with = "optional_id")]
+    #[serde(with = "optional_id_serde")]
+    #[marshal(with = "optional_id_alox")]
     pub animation2_id: Option<usize>,
     pub menu_se: AudioFile,
-    #[serde(with = "optional_id")]
+    #[serde(with = "optional_id_serde")]
+    #[marshal(with = "optional_id_alox")]
     pub common_event_id: Option<usize>,
     pub sp_cost: i32,
     pub power: i32,
@@ -46,31 +55,13 @@ pub struct Skill {
     pub pdef_f: i32,
     pub mdef_f: i32,
     pub variance: i32,
-    #[serde(with = "id_vec")]
+    #[serde(with = "id_vec_serde")]
+    #[marshal(with = "id_vec_alox")]
     pub element_set: Vec<usize>,
-    #[serde(with = "id_vec")]
+    #[serde(with = "id_vec_serde")]
+    #[marshal(with = "id_vec_alox")]
     pub plus_state_set: Vec<usize>,
-    #[serde(with = "id_vec")]
+    #[serde(with = "id_vec_serde")]
+    #[marshal(with = "id_vec_alox")]
     pub minus_state_set: Vec<usize>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
-#[derive(
-    num_enum::TryFromPrimitive,
-    num_enum::IntoPrimitive,
-    strum::Display,
-    strum::EnumIter
-)]
-#[derive(serde::Deserialize, serde::Serialize)]
-#[repr(u8)]
-#[serde(into = "u8")]
-#[serde(try_from = "u8")]
-pub enum Occasion {
-    #[default]
-    Always = 0,
-    #[strum(to_string = "Only in battle")]
-    OnlyBattle = 1,
-    #[strum(to_string = "Only from the menu")]
-    OnlyMenu = 2,
-    Never = 3,
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -41,6 +41,16 @@ pub struct EditWindows {
 type CleanFn = Box<dyn Fn(&Box<dyn Window>) -> bool>;
 
 impl Windows {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn new_with_windows(windows: Vec<impl Window + 'static>) -> Self {
+        Self {
+            windows: windows.into_iter().map(|w| Box::new(w) as Box<_>).collect(),
+        }
+    }
+
     /// A function to add a window.
     pub fn add_window(&mut self, window: impl Window + 'static) {
         self.add_boxed_window(Box::new(window))
@@ -144,11 +154,6 @@ pub trait Window {
         update_state: &mut crate::UpdateState<'_>,
     );
 
-    /// Optionally used as the title of the window.
-    fn name(&self) -> String {
-        "Untitled Window".to_string()
-    }
-
     /// Required to prevent duplication.
     fn id(&self) -> egui::Id;
 
@@ -177,3 +182,9 @@ impl Window for Box<dyn Window + Send + Sync> {
     }
 }
 */
+
+impl From<Vec<Box<dyn Window>>> for Windows {
+    fn from(windows: Vec<Box<dyn Window>>) -> Self {
+        Self { windows }
+    }
+}

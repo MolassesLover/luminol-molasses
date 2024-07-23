@@ -1,13 +1,14 @@
-use super::{canvas_element, canvas_origin, AppRunner};
+use super::{canvas_content_rect, AppRunner, WebRunnerEvent};
 
 pub fn pos_from_mouse_event(
     canvas: &web_sys::HtmlCanvasElement,
     event: &web_sys::MouseEvent,
+    zoom_factor: f32,
 ) -> egui::Pos2 {
-    let rect = canvas.get_bounding_client_rect();
+    let rect = canvas_content_rect(canvas);
     egui::Pos2 {
-        x: event.client_x() as f32 - rect.left() as f32,
-        y: event.client_y() as f32 - rect.top() as f32,
+        x: (event.client_x() as f32 - rect.left()) / zoom_factor,
+        y: (event.client_y() as f32 - rect.top()) / zoom_factor,
     }
 }
 
@@ -25,38 +26,59 @@ pub fn button_from_mouse_event(event: &web_sys::MouseEvent) -> Option<egui::Poin
 /// A single touch is translated to a pointer movement. When a second touch is added, the pointer
 /// should not jump to a different position. Therefore, we do not calculate the average position
 /// of all touches, but we keep using the same touch as long as it is available.
-///
-/// `touch_id_for_pos` is the [`TouchId`](egui::TouchId) of the [`Touch`](web_sys::Touch) we previously used to determine the
-/// pointer position.
-pub fn pos_from_touch_event(
-    canvas: &web_sys::HtmlCanvasElement,
+pub fn primary_touch_pos(
+    state: &super::MainState,
     event: &web_sys::TouchEvent,
-    touch_id_for_pos: &mut Option<egui::TouchId>,
-) -> egui::Pos2 {
-    let touch_for_pos = if let Some(touch_id_for_pos) = touch_id_for_pos {
-        // search for the touch we previously used for the position
-        // (unfortunately, `event.touches()` is not a rust collection):
-        (0..event.touches().length())
-            .map(|i| event.touches().get(i).unwrap())
-            .find(|touch| egui::TouchId::from(touch.identifier()) == *touch_id_for_pos)
-    } else {
-        None
-    };
-    // Use the touch found above or pick the first, or return a default position if there is no
-    // touch at all. (The latter is not expected as the current method is only called when there is
-    // at least one touch.)
-    touch_for_pos
-        .or_else(|| event.touches().get(0))
-        .map_or(Default::default(), |touch| {
-            *touch_id_for_pos = Some(egui::TouchId::from(touch.identifier()));
-            pos_from_touch(canvas_origin(canvas), &touch)
-        })
+    zoom_factor: f32,
+) -> Option<(egui::Pos2, web_sys::Touch)> {
+    let all_touches: Vec<_> = (0..event.touches().length())
+        .filter_map(|i| event.touches().get(i))
+        // On touchend we don't get anything in `touches`, but we still get `changed_touches`, so include those:
+        .chain((0..event.changed_touches().length()).filter_map(|i| event.changed_touches().get(i)))
+        .collect();
+
+    let mut inner = state.inner.borrow_mut();
+
+    if let Some(primary_touch) = inner.touch_id {
+        // Is the primary touch is gone?
+        if !all_touches
+            .iter()
+            .any(|touch| primary_touch == egui::TouchId::from(touch.identifier()))
+        {
+            inner.touch_id = None;
+            state
+                .channels
+                .send_custom(WebRunnerEvent::Touch(inner.touch_id));
+        }
+    }
+
+    if inner.touch_id.is_none() {
+        inner.touch_id = all_touches
+            .first()
+            .map(|touch| egui::TouchId::from(touch.identifier()));
+        state
+            .channels
+            .send_custom(WebRunnerEvent::Touch(inner.touch_id));
+    }
+
+    let primary_touch = inner.touch_id;
+
+    if let Some(primary_touch) = primary_touch {
+        for touch in all_touches {
+            if primary_touch == egui::TouchId::from(touch.identifier()) {
+                let canvas_rect = canvas_content_rect(&state.canvas);
+                return Some((pos_from_touch(canvas_rect, &touch, zoom_factor), touch));
+            }
+        }
+    }
+
+    None
 }
 
-fn pos_from_touch(canvas_origin: egui::Pos2, touch: &web_sys::Touch) -> egui::Pos2 {
+fn pos_from_touch(canvas_rect: egui::Rect, touch: &web_sys::Touch, zoom_factor: f32) -> egui::Pos2 {
     egui::Pos2 {
-        x: touch.page_x() as f32 - canvas_origin.x,
-        y: touch.page_y() as f32 - canvas_origin.y,
+        x: (touch.client_x() as f32 - canvas_rect.left()) / zoom_factor,
+        y: (touch.client_y() as f32 - canvas_rect.top()) / zoom_factor,
     }
 }
 
@@ -65,144 +87,70 @@ pub fn push_touches(
     phase: egui::TouchPhase,
     event: &web_sys::TouchEvent,
 ) {
-    let canvas_origin = canvas_origin(&state.canvas);
+    let canvas_rect = canvas_content_rect(&state.canvas);
     for touch_idx in 0..event.changed_touches().length() {
         if let Some(touch) = event.changed_touches().item(touch_idx) {
             state.channels.send(egui::Event::Touch {
                 device_id: egui::TouchDeviceId(0),
                 id: egui::TouchId::from(touch.identifier()),
                 phase,
-                pos: pos_from_touch(canvas_origin, &touch),
+                pos: pos_from_touch(canvas_rect, &touch, state.channels.zoom_factor()),
                 force: Some(touch.force()),
             });
         }
     }
 }
 
-/// Web sends all keys as strings, so it is up to us to figure out if it is
-/// a real text input or the name of a key.
-pub fn should_ignore_key(key: &str) -> bool {
+/// The text input from a keyboard event (e.g. `X` when pressing the `X` key).
+pub fn text_from_keyboard_event(event: &web_sys::KeyboardEvent) -> Option<String> {
+    let key = event.key();
+
     let is_function_key = key.starts_with('F') && key.len() > 1;
-    is_function_key
-        || matches!(
-            key,
-            "Alt"
-                | "ArrowDown"
-                | "ArrowLeft"
-                | "ArrowRight"
-                | "ArrowUp"
-                | "Backspace"
-                | "CapsLock"
-                | "ContextMenu"
-                | "Control"
-                | "Delete"
-                | "End"
-                | "Enter"
-                | "Esc"
-                | "Escape"
-                | "GroupNext" // https://github.com/emilk/egui/issues/510
-                | "Help"
-                | "Home"
-                | "Insert"
-                | "Meta"
-                | "NumLock"
-                | "PageDown"
-                | "PageUp"
-                | "Pause"
-                | "ScrollLock"
-                | "Shift"
-                | "Tab"
-        )
+    if is_function_key {
+        return None;
+    }
+
+    let is_control_key = matches!(
+        key.as_str(),
+        "Alt"
+      | "ArrowDown"
+      | "ArrowLeft"
+      | "ArrowRight"
+      | "ArrowUp"
+      | "Backspace"
+      | "CapsLock"
+      | "ContextMenu"
+      | "Control"
+      | "Delete"
+      | "End"
+      | "Enter"
+      | "Esc"
+      | "Escape"
+      | "GroupNext" // https://github.com/emilk/egui/issues/510
+      | "Help"
+      | "Home"
+      | "Insert"
+      | "Meta"
+      | "NumLock"
+      | "PageDown"
+      | "PageUp"
+      | "Pause"
+      | "ScrollLock"
+      | "Shift"
+      | "Tab"
+    );
+
+    if is_control_key {
+        return None;
+    }
+
+    Some(key)
 }
 
 /// Web sends all keys as strings, so it is up to us to figure out if it is
 /// a real text input or the name of a key.
 pub fn translate_key(key: &str) -> Option<egui::Key> {
-    use egui::Key;
-
-    match key {
-        "ArrowDown" => Some(Key::ArrowDown),
-        "ArrowLeft" => Some(Key::ArrowLeft),
-        "ArrowRight" => Some(Key::ArrowRight),
-        "ArrowUp" => Some(Key::ArrowUp),
-
-        "Esc" | "Escape" => Some(Key::Escape),
-        "Tab" => Some(Key::Tab),
-        "Backspace" => Some(Key::Backspace),
-        "Enter" => Some(Key::Enter),
-        "Space" | " " => Some(Key::Space),
-
-        "Help" | "Insert" => Some(Key::Insert),
-        "Delete" => Some(Key::Delete),
-        "Home" => Some(Key::Home),
-        "End" => Some(Key::End),
-        "PageUp" => Some(Key::PageUp),
-        "PageDown" => Some(Key::PageDown),
-
-        "-" => Some(Key::Minus),
-        "+" | "=" => Some(Key::PlusEquals),
-
-        "0" => Some(Key::Num0),
-        "1" => Some(Key::Num1),
-        "2" => Some(Key::Num2),
-        "3" => Some(Key::Num3),
-        "4" => Some(Key::Num4),
-        "5" => Some(Key::Num5),
-        "6" => Some(Key::Num6),
-        "7" => Some(Key::Num7),
-        "8" => Some(Key::Num8),
-        "9" => Some(Key::Num9),
-
-        "a" | "A" => Some(Key::A),
-        "b" | "B" => Some(Key::B),
-        "c" | "C" => Some(Key::C),
-        "d" | "D" => Some(Key::D),
-        "e" | "E" => Some(Key::E),
-        "f" | "F" => Some(Key::F),
-        "g" | "G" => Some(Key::G),
-        "h" | "H" => Some(Key::H),
-        "i" | "I" => Some(Key::I),
-        "j" | "J" => Some(Key::J),
-        "k" | "K" => Some(Key::K),
-        "l" | "L" => Some(Key::L),
-        "m" | "M" => Some(Key::M),
-        "n" | "N" => Some(Key::N),
-        "o" | "O" => Some(Key::O),
-        "p" | "P" => Some(Key::P),
-        "q" | "Q" => Some(Key::Q),
-        "r" | "R" => Some(Key::R),
-        "s" | "S" => Some(Key::S),
-        "t" | "T" => Some(Key::T),
-        "u" | "U" => Some(Key::U),
-        "v" | "V" => Some(Key::V),
-        "w" | "W" => Some(Key::W),
-        "x" | "X" => Some(Key::X),
-        "y" | "Y" => Some(Key::Y),
-        "z" | "Z" => Some(Key::Z),
-
-        "F1" => Some(Key::F1),
-        "F2" => Some(Key::F2),
-        "F3" => Some(Key::F3),
-        "F4" => Some(Key::F4),
-        "F5" => Some(Key::F5),
-        "F6" => Some(Key::F6),
-        "F7" => Some(Key::F7),
-        "F8" => Some(Key::F8),
-        "F9" => Some(Key::F9),
-        "F10" => Some(Key::F10),
-        "F11" => Some(Key::F11),
-        "F12" => Some(Key::F12),
-        "F13" => Some(Key::F13),
-        "F14" => Some(Key::F14),
-        "F15" => Some(Key::F15),
-        "F16" => Some(Key::F16),
-        "F17" => Some(Key::F17),
-        "F18" => Some(Key::F18),
-        "F19" => Some(Key::F19),
-        "F20" => Some(Key::F20),
-
-        _ => None,
-    }
+    egui::Key::from_name(key)
 }
 
 macro_rules! modifiers {
@@ -223,11 +171,11 @@ macro_rules! modifiers {
     };
 }
 
-pub fn modifiers_from_event(event: &web_sys::KeyboardEvent) -> egui::Modifiers {
+pub fn modifiers_from_kb_event(event: &web_sys::KeyboardEvent) -> egui::Modifiers {
     modifiers!(event)
 }
 
-pub(super) fn modifiers_from_mouse_event(event: &web_sys::MouseEvent) -> egui::Modifiers {
+pub fn modifiers_from_mouse_event(event: &web_sys::MouseEvent) -> egui::Modifiers {
     modifiers!(event)
 }
 

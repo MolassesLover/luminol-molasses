@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Luminol.  If not, see <http://www.gnu.org/licenses/>.
 
+use color_eyre::eyre::WrapErr;
 #[cfg(target_arch = "wasm32")]
 use itertools::Itertools;
 
@@ -64,6 +65,13 @@ impl FileSystem {
     pub fn unload_project(&mut self) {
         *self = FileSystem::Unloaded;
     }
+
+    pub fn rebuild_path_cache(&mut self) {
+        let FileSystem::Loaded { filesystem, .. } = self else {
+            return;
+        };
+        filesystem.rebuild();
+    }
 }
 
 // Not platform specific
@@ -100,23 +108,75 @@ impl FileSystem {
     }
 
     fn load_project_config(&self) -> Result<luminol_config::project::Config> {
-        self.create_dir(".luminol")?;
+        let c = "While loading project configuration";
+        self.create_dir(".luminol").wrap_err(c)?;
+
+        let game_ini = match self
+            .read_to_string("Game.ini")
+            .ok()
+            .and_then(|i| ini::Ini::load_from_str_noescape(&i).ok())
+        {
+            Some(i) => i,
+            None => {
+                let mut ini = ini::Ini::new();
+                ini.with_section(Some("Game"))
+                    .set("Library", "RGSS104E.dll")
+                    .set("Scripts", "Data/Scripts.rxdata")
+                    .set("Title", "")
+                    .set("RTP1", "")
+                    .set("RTP2", "")
+                    .set("RTP3", "");
+
+                let mut file = self.open_file(
+                    "Game.ini",
+                    OpenFlags::Write | OpenFlags::Create | OpenFlags::Truncate,
+                )?;
+                ini.write_to(&mut file)?;
+
+                ini
+            }
+        };
+
+        let pretty_config = ron::ser::PrettyConfig::new()
+            .struct_names(true)
+            .enumerate_arrays(true);
 
         let project = match self
             .read_to_string(".luminol/config")
             .ok()
-            .and_then(|s| ron::from_str(&s).ok())
+            .and_then(|s| ron::from_str::<luminol_config::project::Project>(&s).ok())
         {
-            Some(c) => c,
+            Some(config) if config.persistence_id != 0 => config,
+            Some(mut config) => {
+                while config.persistence_id == 0 {
+                    config.persistence_id = rand::random();
+                }
+                self.write(
+                    ".luminol/config",
+                    ron::ser::to_string_pretty(&config, pretty_config.clone()).wrap_err(c)?,
+                )
+                .wrap_err(c)?;
+                config
+            }
             None => {
                 let Some(editor_ver) = self.detect_rm_ver() else {
-                    return Err(Error::UnableToDetectRMVer);
+                    return Err(Error::UnableToDetectRMVer).wrap_err(c);
                 };
+                let project_name = game_ini
+                    .general_section()
+                    .get("Title")
+                    .unwrap_or("Untitled Project")
+                    .to_string();
                 let config = luminol_config::project::Project {
                     editor_ver,
+                    project_name,
                     ..Default::default()
                 };
-                self.write(".luminol/config", ron::to_string(&config).unwrap())?;
+                self.write(
+                    ".luminol/config",
+                    ron::ser::to_string_pretty(&config, pretty_config.clone()).wrap_err(c)?,
+                )
+                .wrap_err(c)?;
                 config
             }
         };
@@ -129,28 +189,12 @@ impl FileSystem {
             Some(c) => c,
             None => {
                 let command_db = luminol_config::command_db::CommandDB::new(project.editor_ver);
-                self.write(".luminol/commands", ron::to_string(&command_db).unwrap())?;
+                self.write(
+                    ".luminol/commands",
+                    ron::ser::to_string_pretty(&command_db, pretty_config.clone()).wrap_err(c)?,
+                )
+                .wrap_err(c)?;
                 command_db
-            }
-        };
-
-        let game_ini = match self
-            .read_to_string("Game.ini")
-            .ok()
-            .and_then(|i| ini::Ini::load_from_str_noescape(&i).ok())
-        {
-            Some(i) => i,
-            None => {
-                let mut ini = ini::Ini::new();
-                ini.with_section(Some("Game"))
-                    .set("Library", "RGSS104E.dll")
-                    .set("Scripts", &project.scripts_path)
-                    .set("Title", &project.project_name)
-                    .set("RTP1", "")
-                    .set("RTP2", "")
-                    .set("RTP3", "");
-
-                ini
             }
         };
 
@@ -162,6 +206,8 @@ impl FileSystem {
     }
 
     pub fn debug_ui(&self, ui: &mut egui::Ui) {
+        ui.set_width(ui.available_width());
+
         match self {
             FileSystem::Unloaded => {
                 ui.label("Unloaded");
@@ -186,14 +232,22 @@ impl FileSystem {
         project_config: &mut Option<luminol_config::project::Config>,
         global_config: &mut luminol_config::global::Config,
     ) -> Result<LoadResult> {
+        let c = "While loading project data";
+
         *self = FileSystem::HostLoaded(host);
-        let config = self.load_project_config()?;
+        let config = self.load_project_config().wrap_err(c)?;
 
         let Self::HostLoaded(host) = std::mem::take(self) else {
-            panic!("unable to fetch host filesystem")
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Unable to fetch host filesystem",
+            )
+            .into());
         };
 
-        let result = self.load_partially_loaded_project(host, &config, global_config)?;
+        let result = self
+            .load_partially_loaded_project(host, &config, global_config)
+            .wrap_err(c)?;
 
         *project_config = Some(config);
 
@@ -215,6 +269,7 @@ impl FileSystem {
 #[cfg(windows)]
 impl FileSystem {
     fn find_rtp_paths(
+        filesystem: &host::FileSystem,
         config: &luminol_config::project::Config,
         global_config: &luminol_config::global::Config,
     ) -> (Vec<camino::Utf8PathBuf>, Vec<String>) {
@@ -268,6 +323,14 @@ impl FileSystem {
                     }
                 }
 
+                let path = filesystem.root_path().join("RTP").join(rtp);
+                if let Ok(exists) = filesystem.exists(&path) {
+                    if exists {
+                        paths.push(path);
+                        continue;
+                    }
+                }
+
                 if let Some(path) = global_config.rtp_paths.get(rtp) {
                     let path = camino::Utf8PathBuf::from(path);
                     if path.exists() {
@@ -287,6 +350,7 @@ impl FileSystem {
 #[cfg(not(any(windows, target_arch = "wasm32")))]
 impl FileSystem {
     fn find_rtp_paths(
+        filesystem: &host::FileSystem,
         config: &luminol_config::project::Config,
         global_config: &luminol_config::global::Config,
     ) -> (Vec<camino::Utf8PathBuf>, Vec<String>) {
@@ -307,6 +371,14 @@ impl FileSystem {
                 if let Some(path) = global_config.rtp_paths.get(rtp) {
                     let path = camino::Utf8PathBuf::from(path);
                     if path.exists() {
+                        paths.push(path);
+                        continue;
+                    }
+                }
+
+                let path = filesystem.root_path().join("RTP").join(rtp);
+                if let Ok(exists) = filesystem.exists(&path) {
+                    if exists {
                         paths.push(path);
                         continue;
                     }
@@ -355,9 +427,11 @@ impl FileSystem {
             .map(archiver::FileSystem::new)
             .transpose()?;
 
-        list.push(host);
         // FIXME: handle missing rtps
-        let (found_rtps, missing_rtps) = Self::find_rtp_paths(project_config, global_config);
+        let (found_rtps, missing_rtps) = Self::find_rtp_paths(&host, project_config, global_config);
+
+        list.push(host);
+
         for path in found_rtps {
             list.push(host::FileSystem::new(path))
         }
@@ -435,22 +509,18 @@ impl FileSystem {
         global_config: &mut luminol_config::global::Config,
     ) -> Result<LoadResult> {
         let entries = host.read_dir("")?;
-        if entries
-            .iter()
-            .find(|e| {
-                if let Some(extension) = e.path.extension() {
-                    e.metadata.is_file
-                        && (extension == "rxproj"
-                            || extension == "rvproj"
-                            || extension == "rvproj2"
-                            || extension == "lumproj")
-                } else {
-                    false
-                }
-            })
-            .is_none()
-        {
-            return Err(Error::InvalidProjectFolder);
+        if !entries.iter().any(|e| {
+            if let Some(extension) = e.path.extension() {
+                e.metadata.is_file
+                    && (extension == "rxproj"
+                        || extension == "rvproj"
+                        || extension == "rvproj2"
+                        || extension == "lumproj")
+            } else {
+                false
+            }
+        }) {
+            return Err(Error::InvalidProjectFolder.into());
         };
 
         let root_path = host.root_path().to_path_buf();
@@ -593,7 +663,7 @@ impl crate::FileSystem for FileSystem {
         flags: OpenFlags,
     ) -> Result<Self::File> {
         match self {
-            FileSystem::Unloaded => Err(Error::NotLoaded),
+            FileSystem::Unloaded => Err(Error::NotLoaded.into()),
             FileSystem::HostLoaded(f) => f.open_file(path, flags).map(File::Host),
             FileSystem::Loaded { filesystem: f, .. } => f.open_file(path, flags).map(File::Loaded),
         }
@@ -601,7 +671,7 @@ impl crate::FileSystem for FileSystem {
 
     fn metadata(&self, path: impl AsRef<camino::Utf8Path>) -> Result<Metadata> {
         match self {
-            FileSystem::Unloaded => Err(Error::NotLoaded),
+            FileSystem::Unloaded => Err(Error::NotLoaded.into()),
             FileSystem::HostLoaded(f) => f.metadata(path),
             FileSystem::Loaded { filesystem: f, .. } => f.metadata(path),
         }
@@ -613,7 +683,7 @@ impl crate::FileSystem for FileSystem {
         to: impl AsRef<camino::Utf8Path>,
     ) -> Result<()> {
         match self {
-            FileSystem::Unloaded => Err(Error::NotLoaded),
+            FileSystem::Unloaded => Err(Error::NotLoaded.into()),
             FileSystem::HostLoaded(f) => f.rename(from, to),
             FileSystem::Loaded { filesystem, .. } => filesystem.rename(from, to),
         }
@@ -621,7 +691,7 @@ impl crate::FileSystem for FileSystem {
 
     fn exists(&self, path: impl AsRef<camino::Utf8Path>) -> Result<bool> {
         match self {
-            FileSystem::Unloaded => Err(Error::NotLoaded),
+            FileSystem::Unloaded => Err(Error::NotLoaded.into()),
             FileSystem::HostLoaded(f) => f.exists(path),
             FileSystem::Loaded { filesystem, .. } => filesystem.exists(path),
         }
@@ -629,7 +699,7 @@ impl crate::FileSystem for FileSystem {
 
     fn create_dir(&self, path: impl AsRef<camino::Utf8Path>) -> Result<()> {
         match self {
-            FileSystem::Unloaded => Err(Error::NotLoaded),
+            FileSystem::Unloaded => Err(Error::NotLoaded.into()),
             FileSystem::HostLoaded(f) => f.create_dir(path),
             FileSystem::Loaded { filesystem, .. } => filesystem.create_dir(path),
         }
@@ -637,7 +707,7 @@ impl crate::FileSystem for FileSystem {
 
     fn remove_dir(&self, path: impl AsRef<camino::Utf8Path>) -> Result<()> {
         match self {
-            FileSystem::Unloaded => Err(Error::NotLoaded),
+            FileSystem::Unloaded => Err(Error::NotLoaded.into()),
             FileSystem::HostLoaded(f) => f.remove_dir(path),
             FileSystem::Loaded { filesystem, .. } => filesystem.remove_dir(path),
         }
@@ -645,7 +715,7 @@ impl crate::FileSystem for FileSystem {
 
     fn remove_file(&self, path: impl AsRef<camino::Utf8Path>) -> Result<()> {
         match self {
-            FileSystem::Unloaded => Err(Error::NotLoaded),
+            FileSystem::Unloaded => Err(Error::NotLoaded.into()),
             FileSystem::HostLoaded(f) => f.remove_file(path),
             FileSystem::Loaded { filesystem, .. } => filesystem.remove_file(path),
         }
@@ -653,7 +723,7 @@ impl crate::FileSystem for FileSystem {
 
     fn read_dir(&self, path: impl AsRef<camino::Utf8Path>) -> Result<Vec<DirEntry>> {
         match self {
-            FileSystem::Unloaded => Err(Error::NotLoaded),
+            FileSystem::Unloaded => Err(Error::NotLoaded.into()),
             FileSystem::HostLoaded(f) => f.read_dir(path),
             FileSystem::Loaded { filesystem, .. } => filesystem.read_dir(path),
         }

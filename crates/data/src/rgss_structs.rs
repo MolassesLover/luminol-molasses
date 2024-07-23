@@ -1,12 +1,12 @@
 #![allow(missing_docs)]
-use serde::{Deserialize, Serialize};
 
 /// **A struct representing an RGBA color.**
 ///
 /// Used all over the place in RGSS.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
-#[serde(from = "alox_48::Userdata")]
-#[serde(into = "alox_48::Userdata")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(from = "alox_48::Userdata", into = "alox_48::Userdata")]
 #[derive(bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct Color {
@@ -18,7 +18,7 @@ pub struct Color {
 
 impl From<alox_48::Userdata> for Color {
     fn from(value: alox_48::Userdata) -> Self {
-        bytemuck::cast_slice(&value.data)[0]
+        *bytemuck::from_bytes(&value.data)
     }
 }
 
@@ -26,7 +26,7 @@ impl From<Color> for alox_48::Userdata {
     fn from(value: Color) -> Self {
         alox_48::Userdata {
             class: "Color".into(),
-            data: bytemuck::cast_slice(&[value]).to_vec(),
+            data: bytemuck::bytes_of(&value).to_vec(),
         }
     }
 }
@@ -52,9 +52,10 @@ impl Default for Color {
 /// **A struct representing an offset to an RGBA color.**
 ///
 /// Its members are f64 but must not exceed the range of 255..-255.
-#[derive(Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
-#[serde(from = "alox_48::Userdata")]
-#[serde(into = "alox_48::Userdata")]
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(from = "alox_48::Userdata", into = "alox_48::Userdata")]
 #[derive(bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct Tone {
@@ -66,7 +67,7 @@ pub struct Tone {
 
 impl From<alox_48::Userdata> for Tone {
     fn from(value: alox_48::Userdata) -> Self {
-        bytemuck::cast_slice(&value.data)[0]
+        *bytemuck::from_bytes(&value.data)
     }
 }
 
@@ -74,7 +75,7 @@ impl From<Tone> for alox_48::Userdata {
     fn from(value: Tone) -> Self {
         alox_48::Userdata {
             class: "Tone".into(),
-            data: bytemuck::cast_slice(&[value]).to_vec(),
+            data: bytemuck::bytes_of(&value).to_vec(),
         }
     }
 }
@@ -90,9 +91,10 @@ use std::ops::{Index, IndexMut};
 /// Normal RGSS has dynamically dimensioned arrays, but in practice that does not map well to Rust.
 /// We don't particularly need dynamically sized arrays anyway.
 /// 1D Table.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(from = "alox_48::Userdata")]
-#[serde(into = "alox_48::Userdata")]
+#[derive(Debug, Default, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(from = "alox_48::Userdata", into = "alox_48::Userdata")]
 pub struct Table1 {
     xsize: usize,
     data: Vec<i16>,
@@ -163,6 +165,11 @@ impl Table1 {
         self.xsize = xsize;
     }
 
+    pub fn resize_with_value(&mut self, xsize: usize, value: i16) {
+        self.data.resize(xsize, value);
+        self.xsize = xsize;
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &i16> {
         self.data.iter()
     }
@@ -191,9 +198,10 @@ impl IndexMut<usize> for Table1 {
 }
 
 /// 2D table. See [`Table1`].
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(from = "alox_48::Userdata")]
-#[serde(into = "alox_48::Userdata")]
+#[derive(Debug, Default, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(from = "alox_48::Userdata", into = "alox_48::Userdata")]
 pub struct Table2 {
     xsize: usize,
     ysize: usize,
@@ -315,9 +323,10 @@ impl IndexMut<(usize, usize)> for Table2 {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(from = "alox_48::Userdata")]
-#[serde(into = "alox_48::Userdata")]
+#[derive(Debug, Default, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(alox_48::Deserialize, alox_48::Serialize)]
+#[marshal(from = "alox_48::Userdata", into = "alox_48::Userdata")]
 /// 3D table. See [`Table2`].
 pub struct Table3 {
     xsize: usize,

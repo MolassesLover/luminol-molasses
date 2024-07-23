@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -23,6 +23,7 @@
 // Program grant you additional permission to convey the resulting work.
 
 #[cfg(not(target_arch = "wasm32"))]
-mod _impl;
+mod backends;
+
 #[cfg(not(target_arch = "wasm32"))]
-pub use _impl::*;
+pub mod widget;

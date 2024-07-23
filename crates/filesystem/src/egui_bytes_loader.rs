@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -27,12 +27,10 @@ use std::sync::Arc;
 use dashmap::{DashMap, DashSet};
 use egui::load::{Bytes, BytesPoll, LoadError};
 
-use crate::Error;
-
 #[derive(Default)]
 pub struct Loader {
     loaded_files: DashMap<camino::Utf8PathBuf, Arc<[u8]>>,
-    errored_files: DashMap<camino::Utf8PathBuf, Error>,
+    errored_files: DashMap<camino::Utf8PathBuf, color_eyre::Report>,
     unloaded_files: DashSet<camino::Utf8PathBuf>,
 }
 

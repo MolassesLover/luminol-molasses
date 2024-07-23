@@ -2,13 +2,19 @@
 
 use std::{borrow::Cow, num::NonZeroU64, ops::Range};
 
-use epaint::{ahash::HashMap, emath::NumExt, PaintCallbackInfo, Primitive, Vertex};
+use ahash::HashMap;
+use epaint::{emath::NumExt, PaintCallbackInfo, Primitive, Vertex};
 
-use wgpu;
 use wgpu::util::DeviceExt as _;
 
+/// You can use this for storage when implementing [`CallbackTrait`].
 pub type CallbackResources = type_map::concurrent::TypeMap;
 
+/// You can use this to do custom [`wgpu`] rendering in an egui app.
+///
+/// Implement [`CallbackTrait`] and call [`Callback::new_paint_callback`].
+///
+/// This can be turned into a [`epaint::PaintCallback`] and [`epaint::Shape`].
 pub struct Callback(Box<dyn CallbackTrait>);
 
 impl Callback {
@@ -44,7 +50,7 @@ impl Callback {
 ///
 /// ## Command Encoder
 ///
-/// The passed-in `CommandEncoder` is egui's and can be used directly to register
+/// The passed-in [`wgpu::CommandEncoder`] is egui's and can be used directly to register
 /// wgpu commands for simple use cases.
 /// This allows reusing the same [`wgpu::CommandEncoder`] for all callbacks and egui
 /// rendering itself.
@@ -52,7 +58,7 @@ impl Callback {
 /// ## Command Buffers
 ///
 /// For more complicated use cases, one can also return a list of arbitrary
-/// `CommandBuffer`s and have complete control over how they get created and fed.
+/// [`wgpu::CommandBuffer`]s and have complete control over how they get created and fed.
 /// In particular, this gives an opportunity to parallelize command registration and
 /// prevents a faulty callback from poisoning the main wgpu pipeline.
 ///
@@ -73,6 +79,7 @@ pub trait CallbackTrait: Send + Sync {
         &self,
         _device: &wgpu::Device,
         _queue: &wgpu::Queue,
+        _screen_descriptor: &ScreenDescriptor,
         _egui_encoder: &mut wgpu::CommandEncoder,
         _callback_resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
@@ -156,7 +163,7 @@ pub struct Renderer {
     texture_bind_group_layout: wgpu::BindGroupLayout,
 
     /// Map of egui texture IDs to textures and their associated bindgroups (texture view +
-    /// sampler). The texture may be None if the TextureId is just a handle to a user-provided
+    /// sampler). The texture may be None if the `TextureId` is just a handle to a user-provided
     /// sampler.
     textures: HashMap<epaint::TextureId, (Option<wgpu::Texture>, wgpu::BindGroup)>,
     next_user_texture_id: u64,
@@ -287,6 +294,7 @@ impl Renderer {
                         // 2: uint color
                         attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint32],
                     }],
+                    compilation_options: wgpu::PipelineCompilationOptions::default()
                 },
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -328,6 +336,7 @@ impl Renderer {
                         }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default()
                 }),
                 multiview: None,
             }
@@ -450,39 +459,35 @@ impl Renderer {
                         continue;
                     };
 
-                    if callback.rect.is_positive() {
+                    let info = PaintCallbackInfo {
+                        viewport: callback.rect,
+                        clip_rect: *clip_rect,
+                        pixels_per_point,
+                        screen_size_px: size_in_pixels,
+                    };
+
+                    let viewport_px = info.viewport_in_pixels();
+                    if viewport_px.width_px > 0 && viewport_px.height_px > 0 {
                         crate::profile_scope!("callback");
 
                         needs_reset = true;
 
-                        let info = PaintCallbackInfo {
-                            viewport: callback.rect,
-                            clip_rect: *clip_rect,
-                            pixels_per_point,
-                            screen_size_px: size_in_pixels,
-                        };
-
-                        {
-                            // We're setting a default viewport for the render pass as a
-                            // courtesy for the user, so that they don't have to think about
-                            // it in the simple case where they just want to fill the whole
-                            // paint area.
-                            //
-                            // The user still has the possibility of setting their own custom
-                            // viewport during the paint callback, effectively overriding this
-                            // one.
-
-                            let viewport_px = info.viewport_in_pixels();
-
-                            render_pass.set_viewport(
-                                viewport_px.left_px as f32,
-                                viewport_px.top_px as f32,
-                                viewport_px.width_px as f32,
-                                viewport_px.height_px as f32,
-                                0.0,
-                                1.0,
-                            );
-                        }
+                        // We're setting a default viewport for the render pass as a
+                        // courtesy for the user, so that they don't have to think about
+                        // it in the simple case where they just want to fill the whole
+                        // paint area.
+                        //
+                        // The user still has the possibility of setting their own custom
+                        // viewport during the paint callback, effectively overriding this
+                        // one.
+                        render_pass.set_viewport(
+                            viewport_px.left_px as f32,
+                            viewport_px.top_px as f32,
+                            viewport_px.width_px as f32,
+                            viewport_px.height_px as f32,
+                            0.0,
+                            1.0,
+                        );
 
                         cbfn.0.paint(info, render_pass, &self.callback_resources);
                     }
@@ -493,7 +498,7 @@ impl Renderer {
         render_pass.set_scissor_rect(0, 0, size_in_pixels[0], size_in_pixels[1]);
     }
 
-    /// Should be called before `render()`.
+    /// Should be called before [`Self::render`].
     pub fn update_texture(
         &mut self,
         device: &wgpu::Device,
@@ -626,12 +631,11 @@ impl Renderer {
         self.textures.get(id)
     }
 
-    /// Registers a `wgpu::Texture` with a `epaint::TextureId`.
+    /// Registers a [`wgpu::Texture`] with a [`epaint::TextureId`].
     ///
     /// This enables the application to reference the texture inside an image ui element.
     /// This effectively enables off-screen rendering inside the egui UI. Texture must have
-    /// the texture format `TextureFormat::Rgba8UnormSrgb` and
-    /// Texture usage `TextureUsage::SAMPLED`.
+    /// the texture format [`wgpu::TextureFormat::Rgba8UnormSrgb`].
     pub fn register_native_texture(
         &mut self,
         device: &wgpu::Device,
@@ -650,9 +654,9 @@ impl Renderer {
         )
     }
 
-    /// Registers a `wgpu::Texture` with an existing `epaint::TextureId`.
+    /// Registers a [`wgpu::Texture`] with an existing [`epaint::TextureId`].
     ///
-    /// This enables applications to reuse `TextureId`s.
+    /// This enables applications to reuse [`epaint::TextureId`]s.
     pub fn update_egui_texture_from_wgpu_texture(
         &mut self,
         device: &wgpu::Device,
@@ -673,15 +677,14 @@ impl Renderer {
         );
     }
 
-    /// Registers a `wgpu::Texture` with a `epaint::TextureId` while also accepting custom
-    /// `wgpu::SamplerDescriptor` options.
+    /// Registers a [`wgpu::Texture`] with a [`epaint::TextureId`] while also accepting custom
+    /// [`wgpu::SamplerDescriptor`] options.
     ///
     /// This allows applications to specify individual minification/magnification filters as well as
     /// custom mipmap and tiling options.
     ///
-    /// The `Texture` must have the format `TextureFormat::Rgba8UnormSrgb` and usage
-    /// `TextureUsage::SAMPLED`. Any compare function supplied in the `SamplerDescriptor` will be
-    /// ignored.
+    /// The texture must have the format [`wgpu::TextureFormat::Rgba8UnormSrgb`].
+    /// Any compare function supplied in the [`wgpu::SamplerDescriptor`] will be ignored.
     #[allow(clippy::needless_pass_by_value)] // false positive
     pub fn register_native_texture_with_sampler_options(
         &mut self,
@@ -718,10 +721,10 @@ impl Renderer {
         id
     }
 
-    /// Registers a `wgpu::Texture` with an existing `epaint::TextureId` while also accepting custom
-    /// `wgpu::SamplerDescriptor` options.
+    /// Registers a [`wgpu::Texture`] with an existing [`epaint::TextureId`] while also accepting custom
+    /// [`wgpu::SamplerDescriptor`] options.
     ///
-    /// This allows applications to reuse `TextureId`s created with custom sampler options.
+    /// This allows applications to reuse [`epaint::TextureId`]s created with custom sampler options.
     #[allow(clippy::needless_pass_by_value)] // false positive
     pub fn update_egui_texture_from_wgpu_texture_with_sampler_options(
         &mut self,
@@ -761,7 +764,7 @@ impl Renderer {
     }
 
     /// Uploads the uniform, vertex and index data used by the renderer.
-    /// Should be called before `render()`.
+    /// Should be called before [`Self::render`].
     ///
     /// Returns all user-defined command buffers gathered from [`CallbackTrait::prepare`] & [`CallbackTrait::finish_prepare`] callbacks.
     pub fn update_buffers(
@@ -812,9 +815,10 @@ impl Renderer {
         };
 
         if index_count > 0 {
-            crate::profile_scope!("indices");
+            crate::profile_scope!("indices", index_count.to_string());
 
             self.index_buffer.slices.clear();
+
             let required_index_buffer_size = (std::mem::size_of::<u32>() * index_count) as u64;
             if self.index_buffer.capacity < required_index_buffer_size {
                 // Resize index buffer if needed.
@@ -823,13 +827,16 @@ impl Renderer {
                 self.index_buffer.buffer = create_index_buffer(device, self.index_buffer.capacity);
             }
 
-            let mut index_buffer_staging = queue
-                .write_buffer_with(
-                    &self.index_buffer.buffer,
-                    0,
-                    NonZeroU64::new(required_index_buffer_size).unwrap(),
-                )
-                .expect("Failed to create staging buffer for index data");
+            let index_buffer_staging = queue.write_buffer_with(
+                &self.index_buffer.buffer,
+                0,
+                NonZeroU64::new(required_index_buffer_size).unwrap(),
+            );
+
+            let Some(mut index_buffer_staging) = index_buffer_staging else {
+                panic!("Failed to create staging buffer for index data. Index count: {index_count}. Required index buffer size: {required_index_buffer_size}. Actual size {} and capacity: {} (bytes)", self.index_buffer.buffer.size(), self.index_buffer.capacity);
+            };
+
             let mut index_offset = 0;
             for epaint::ClippedPrimitive { primitive, .. } in paint_jobs {
                 match primitive {
@@ -846,9 +853,10 @@ impl Renderer {
             }
         }
         if vertex_count > 0 {
-            crate::profile_scope!("vertices");
+            crate::profile_scope!("vertices", vertex_count.to_string());
 
             self.vertex_buffer.slices.clear();
+
             let required_vertex_buffer_size = (std::mem::size_of::<Vertex>() * vertex_count) as u64;
             if self.vertex_buffer.capacity < required_vertex_buffer_size {
                 // Resize vertex buffer if needed.
@@ -858,13 +866,16 @@ impl Renderer {
                     create_vertex_buffer(device, self.vertex_buffer.capacity);
             }
 
-            let mut vertex_buffer_staging = queue
-                .write_buffer_with(
-                    &self.vertex_buffer.buffer,
-                    0,
-                    NonZeroU64::new(required_vertex_buffer_size).unwrap(),
-                )
-                .expect("Failed to create staging buffer for vertex data");
+            let vertex_buffer_staging = queue.write_buffer_with(
+                &self.vertex_buffer.buffer,
+                0,
+                NonZeroU64::new(required_vertex_buffer_size).unwrap(),
+            );
+
+            let Some(mut vertex_buffer_staging) = vertex_buffer_staging else {
+                panic!("Failed to create staging buffer for vertex data. Vertex count: {vertex_count}. Required vertex buffer size: {required_vertex_buffer_size}. Actual size {} and capacity: {} (bytes)", self.vertex_buffer.buffer.size(), self.vertex_buffer.capacity);
+            };
+
             let mut vertex_offset = 0;
             for epaint::ClippedPrimitive { primitive, .. } in paint_jobs {
                 match primitive {
@@ -888,6 +899,7 @@ impl Renderer {
                 user_cmd_bufs.extend(callback.prepare(
                     device,
                     queue,
+                    screen_descriptor,
                     encoder,
                     &mut self.callback_resources,
                 ));
@@ -921,12 +933,19 @@ fn create_sampler(
         epaint::textures::TextureFilter::Nearest => wgpu::FilterMode::Nearest,
         epaint::textures::TextureFilter::Linear => wgpu::FilterMode::Linear,
     };
+    let address_mode = match options.wrap_mode {
+        epaint::textures::TextureWrapMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+        epaint::textures::TextureWrapMode::Repeat => wgpu::AddressMode::Repeat,
+        epaint::textures::TextureWrapMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
+    };
     device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some(&format!(
             "egui sampler (mag: {mag_filter:?}, min {min_filter:?})"
         )),
         mag_filter,
         min_filter,
+        address_mode_u: address_mode,
+        address_mode_v: address_mode,
         ..Default::default()
     })
 }

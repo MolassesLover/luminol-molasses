@@ -15,7 +15,8 @@ pub use crate::native::winit_integration::UserEvent;
 
 #[cfg(not(target_arch = "wasm32"))]
 use raw_window_handle::{
-    HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle,
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, WindowHandle,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use static_assertions::assert_not_impl_any;
@@ -40,10 +41,12 @@ pub type EventLoopBuilderHook = Box<dyn FnOnce(&mut EventLoopBuilder<UserEvent>)
 #[cfg(any(feature = "glow", feature = "wgpu"))]
 pub type WindowBuilderHook = Box<dyn FnOnce(egui::ViewportBuilder) -> egui::ViewportBuilder>;
 
+type DynError = Box<dyn std::error::Error + Send + Sync>;
+
 /// This is how your app is created.
 ///
 /// You can use the [`CreationContext`] to setup egui, restore state, setup OpenGL things, etc.
-pub type AppCreator = Box<dyn FnOnce(&CreationContext<'_>) -> Box<dyn App>>;
+pub type AppCreator = Box<dyn FnOnce(&CreationContext<'_>) -> Result<Box<dyn App>, DynError>>;
 
 /// Data that is passed to [`AppCreator`] that can be used to setup and initialize your app.
 pub struct CreationContext<'s> {
@@ -64,7 +67,11 @@ pub struct CreationContext<'s> {
     ///
     /// Only available when compiling with the `glow` feature and using [`Renderer::Glow`].
     #[cfg(feature = "glow")]
-    pub gl: Option<std::rc::Rc<glow::Context>>,
+    pub gl: Option<std::sync::Arc<glow::Context>>,
+
+    /// The `get_proc_address` wrapper of underlying GL context
+    #[cfg(feature = "glow")]
+    pub get_proc_address: Option<&'s dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
 
     /// The underlying WGPU render state.
     ///
@@ -76,30 +83,28 @@ pub struct CreationContext<'s> {
 
     /// Raw platform window handle
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) raw_window_handle: RawWindowHandle,
+    pub(crate) raw_window_handle: Result<RawWindowHandle, HandleError>,
 
     /// Raw platform display handle for window
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) raw_display_handle: RawDisplayHandle,
+    pub(crate) raw_display_handle: Result<RawDisplayHandle, HandleError>,
 }
-
-// Implementing `Clone` would violate the guarantees of `HasRawWindowHandle` and `HasRawDisplayHandle`.
-#[cfg(not(target_arch = "wasm32"))]
-assert_not_impl_any!(CreationContext<'_>: Clone);
 
 #[allow(unsafe_code)]
 #[cfg(not(target_arch = "wasm32"))]
-unsafe impl HasRawWindowHandle for CreationContext<'_> {
-    fn raw_window_handle(&self) -> RawWindowHandle {
-        self.raw_window_handle
+impl HasWindowHandle for CreationContext<'_> {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        // Safety: the lifetime is correct.
+        unsafe { Ok(WindowHandle::borrow_raw(self.raw_window_handle.clone()?)) }
     }
 }
 
 #[allow(unsafe_code)]
 #[cfg(not(target_arch = "wasm32"))]
-unsafe impl HasRawDisplayHandle for CreationContext<'_> {
-    fn raw_display_handle(&self) -> RawDisplayHandle {
-        self.raw_display_handle
+impl HasDisplayHandle for CreationContext<'_> {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        // Safety: the lifetime is correct.
+        unsafe { Ok(DisplayHandle::borrow_raw(self.raw_display_handle.clone()?)) }
     }
 }
 
@@ -147,6 +152,7 @@ pub trait App {
     /// On web the state is stored to "Local Storage".
     ///
     /// On native the path is picked using [`crate::storage_dir`].
+    /// The path can be customized via [`NativeOptions::persistence_path`].
     fn save(&mut self, _storage: &mut dyn Storage) {}
 
     /// Called once on shutdown, after [`Self::save`].
@@ -197,6 +203,24 @@ pub trait App {
     fn persist_egui_memory(&self) -> bool {
         true
     }
+
+    /// A hook for manipulating or filtering raw input before it is processed by [`Self::update`].
+    ///
+    /// This function provides a way to modify or filter input events before they are processed by egui.
+    ///
+    /// It can be used to prevent specific keyboard shortcuts or mouse events from being processed by egui.
+    ///
+    /// Additionally, it can be used to inject custom keyboard or mouse events into the input stream, which can be useful for implementing features like a virtual keyboard.
+    ///
+    /// # Arguments
+    ///
+    /// * `_ctx` - The context of the egui, which provides access to the current state of the egui.
+    /// * `_raw_input` - The raw input events that are about to be processed. This can be modified to change the input that egui processes.
+    ///
+    /// # Note
+    ///
+    /// This function does not return a value. Any changes to the input should be made directly to `_raw_input`.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, _raw_input: &mut egui::RawInput) {}
 }
 
 /// Selects the level of hardware graphics acceleration.
@@ -211,13 +235,13 @@ pub enum HardwareAcceleration {
 
     /// Do NOT use graphics acceleration.
     ///
-    /// On some platforms (MacOS) this is ignored and treated the same as [`Self::Preferred`].
+    /// On some platforms (macOS) this is ignored and treated the same as [`Self::Preferred`].
     Off,
 }
 
 /// Options controlling the behavior of a native window.
 ///
-/// Addintional windows can be opened using (egui viewports)[`egui::viewport`].
+/// Additional windows can be opened using (egui viewports)[`egui::viewport`].
 ///
 /// Set the window title and size using [`Self::viewport`].
 ///
@@ -298,7 +322,7 @@ pub struct NativeOptions {
     ///
     /// This feature was introduced in <https://github.com/emilk/egui/pull/1889>.
     ///
-    /// When `true`, [`winit::platform::run_return::EventLoopExtRunReturn::run_return`] is used.
+    /// When `true`, [`winit::platform::run_on_demand::EventLoopExtRunOnDemand`] is used.
     /// When `false`, [`winit::event_loop::EventLoop::run`] is used.
     pub run_and_return: bool,
 
@@ -341,6 +365,10 @@ pub struct NativeOptions {
     /// Controls whether or not the native window position and size will be
     /// persisted (only if the "persistence" feature is enabled).
     pub persist_window: bool,
+
+    /// The folder where `eframe` will store the app state. If not set, eframe will get the paths
+    /// from [directories].
+    pub persistence_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -357,6 +385,8 @@ impl Clone for NativeOptions {
 
             #[cfg(feature = "wgpu")]
             wgpu_options: self.wgpu_options.clone(),
+
+            persistence_path: self.persistence_path.clone(),
 
             ..*self
         }
@@ -397,6 +427,8 @@ impl Default for NativeOptions {
             wgpu_options: luminol_egui_wgpu::WgpuConfiguration::default(),
 
             persist_window: true,
+
+            persistence_path: None,
         }
     }
 }
@@ -434,11 +466,6 @@ pub struct WebOptions {
     /// Configures wgpu instance/device/adapter/surface creation and renderloop.
     #[cfg(feature = "wgpu")]
     pub wgpu_options: luminol_egui_wgpu::WgpuConfiguration,
-
-    /// The size limit of the web app canvas.
-    ///
-    /// By default the max size is [`egui::Vec2::INFINITY`], i.e. unlimited.
-    pub max_size_points: egui::Vec2,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -454,8 +481,6 @@ impl Default for WebOptions {
 
             #[cfg(feature = "wgpu")]
             wgpu_options: luminol_egui_wgpu::WgpuConfiguration::default(),
-
-            max_size_points: egui::Vec2::INFINITY,
         }
     }
 }
@@ -497,10 +522,10 @@ pub enum WebGlContextOption {
     /// Force use WebGL2.
     WebGl2,
 
-    /// Use WebGl2 first.
+    /// Use WebGL2 first.
     BestFirst,
 
-    /// Use WebGl1 first
+    /// Use WebGL1 first
     CompatibilityFirst,
 }
 
@@ -526,16 +551,23 @@ pub enum Renderer {
 #[cfg(any(feature = "glow", feature = "wgpu"))]
 impl Default for Renderer {
     fn default() -> Self {
+        #[cfg(not(feature = "glow"))]
+        #[cfg(not(feature = "wgpu"))]
+        compile_error!("eframe: you must enable at least one of the rendering backend features: 'glow' or 'wgpu'");
+
         #[cfg(feature = "glow")]
+        #[cfg(not(feature = "wgpu"))]
         return Self::Glow;
 
         #[cfg(not(feature = "glow"))]
         #[cfg(feature = "wgpu")]
         return Self::Wgpu;
 
-        #[cfg(not(feature = "glow"))]
-        #[cfg(not(feature = "wgpu"))]
-        compile_error!("eframe: you must enable at least one of the rendering backend features: 'glow' or 'wgpu'");
+        // By default, only the `glow` feature is enabled, so if the user added `wgpu` to the feature list
+        // they probably wanted to use wgpu:
+        #[cfg(feature = "glow")]
+        #[cfg(feature = "wgpu")]
+        return Self::Wgpu;
     }
 }
 
@@ -574,7 +606,7 @@ impl std::str::FromStr for Renderer {
 /// Represents the surroundings of your app.
 ///
 /// It provides methods to inspect the surroundings (are we on the web?),
-/// allocate textures, and change settings (e.g. window size).
+/// access to persistent storage, and access to the rendering backend.
 pub struct Frame {
     /// Information about the integration.
     pub(crate) info: IntegrationInfo,
@@ -584,7 +616,12 @@ pub struct Frame {
 
     /// A reference to the underlying [`glow`] (OpenGL) context.
     #[cfg(feature = "glow")]
-    pub(crate) gl: Option<std::rc::Rc<glow::Context>>,
+    pub(crate) gl: Option<std::sync::Arc<glow::Context>>,
+
+    /// Used to convert user custom [`glow::Texture`] to [`egui::TextureId`]
+    #[cfg(all(feature = "glow", not(target_arch = "wasm32")))]
+    pub(crate) glow_register_native_texture:
+        Option<Box<dyn FnMut(glow::Texture) -> egui::TextureId>>,
 
     /// Can be used to manage GPU resources for custom rendering with WGPU using [`egui::PaintCallback`]s.
     #[cfg(feature = "wgpu")]
@@ -592,30 +629,32 @@ pub struct Frame {
 
     /// Raw platform window handle
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) raw_window_handle: RawWindowHandle,
+    pub(crate) raw_window_handle: Result<RawWindowHandle, HandleError>,
 
     /// Raw platform display handle for window
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) raw_display_handle: RawDisplayHandle,
+    pub(crate) raw_display_handle: Result<RawDisplayHandle, HandleError>,
 }
 
-// Implementing `Clone` would violate the guarantees of `HasRawWindowHandle` and `HasRawDisplayHandle`.
+// Implementing `Clone` would violate the guarantees of `HasWindowHandle` and `HasDisplayHandle`.
 #[cfg(not(target_arch = "wasm32"))]
 assert_not_impl_any!(Frame: Clone);
 
 #[allow(unsafe_code)]
 #[cfg(not(target_arch = "wasm32"))]
-unsafe impl HasRawWindowHandle for Frame {
-    fn raw_window_handle(&self) -> RawWindowHandle {
-        self.raw_window_handle
+impl HasWindowHandle for Frame {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        // Safety: the lifetime is correct.
+        unsafe { Ok(WindowHandle::borrow_raw(self.raw_window_handle.clone()?)) }
     }
 }
 
 #[allow(unsafe_code)]
 #[cfg(not(target_arch = "wasm32"))]
-unsafe impl HasRawDisplayHandle for Frame {
-    fn raw_display_handle(&self) -> RawDisplayHandle {
-        self.raw_display_handle
+impl HasDisplayHandle for Frame {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        // Safety: the lifetime is correct.
+        unsafe { Ok(DisplayHandle::borrow_raw(self.raw_display_handle.clone()?)) }
     }
 }
 
@@ -656,8 +695,17 @@ impl Frame {
     /// To get a [`glow`] context you need to compile with the `glow` feature flag,
     /// and run eframe using [`Renderer::Glow`].
     #[cfg(feature = "glow")]
-    pub fn gl(&self) -> Option<&std::rc::Rc<glow::Context>> {
+    pub fn gl(&self) -> Option<&std::sync::Arc<glow::Context>> {
         self.gl.as_ref()
+    }
+
+    /// Register your own [`glow::Texture`],
+    /// and then you can use the returned [`egui::TextureId`] to render your texture with [`egui`].
+    ///
+    /// This function will take the ownership of your [`glow::Texture`], so please do not delete your [`glow::Texture`] after registering.
+    #[cfg(all(feature = "glow", not(target_arch = "wasm32")))]
+    pub fn register_native_glow_texture(&mut self, native: glow::Texture) -> egui::TextureId {
+        self.glow_register_native_texture.as_mut().unwrap()(native)
     }
 
     /// The underlying WGPU render state.
@@ -688,7 +736,7 @@ pub struct WebInfo {
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug)]
 pub struct Location {
-    /// The full URL (`location.href`) without the hash.
+    /// The full URL (`location.href`) without the hash, percent-decoded.
     ///
     /// Example: `"http://www.example.com:80/index.html?foo=bar"`.
     pub url: String,
@@ -728,8 +776,8 @@ pub struct Location {
 
     /// The parsed "query" part of "www.example.com/index.html?query#fragment".
     ///
-    /// "foo=42&bar%20" is parsed as `{"foo": "42",  "bar ": ""}`
-    pub query_map: std::collections::BTreeMap<String, String>,
+    /// "foo=hello&bar%20&foo=world" is parsed as `{"bar ": [""], "foo": ["hello", "world"]}`
+    pub query_map: std::collections::BTreeMap<String, Vec<String>>,
 
     /// `location.origin`
     ///
@@ -749,7 +797,13 @@ pub struct IntegrationInfo {
     /// `None` means "don't know".
     pub system_theme: Option<Theme>,
 
-    /// Seconds of cpu usage (in seconds) of UI code on the previous frame.
+    /// Seconds of cpu usage (in seconds) on the previous frame.
+    ///
+    /// This includes [`App::update`] as well as rendering (except for vsync waiting).
+    ///
+    /// For a more detailed view of cpu usage, use the [`puffin`](https://crates.io/crates/puffin)
+    /// profiler together with the `puffin` feature of `eframe`.
+    ///
     /// `None` if this is the first frame.
     pub cpu_usage: Option<f32>,
 }

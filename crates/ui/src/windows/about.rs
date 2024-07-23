@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -28,7 +28,7 @@ pub struct Window {
     icon: egui::Image<'static>,
 }
 
-const ICON: &[u8] = include_bytes!("../../../../assets/icon-256.png");
+const ICON: &[u8] = luminol_macros::include_asset!("assets/icons/icon.png");
 
 impl Default for Window {
     fn default() -> Self {
@@ -36,16 +36,12 @@ impl Default for Window {
             // We load the icon here so it isn't loaded every frame. That would be bad if we did.
             // It would be better to load the image at compile time and only use one image instance
             // (as we load the image once at start for the icon) but this is the best I can do.
-            icon: egui::Image::from_bytes("assets/icon-256.png", ICON).fit_to_original_size(0.5),
+            icon: egui::Image::from_bytes("assets/icon.png", ICON).fit_to_original_size(0.5),
         }
     }
 }
 
 impl luminol_core::Window for Window {
-    fn name(&self) -> String {
-        "About".to_string()
-    }
-
     fn id(&self) -> egui::Id {
         egui::Id::new("About Luminol")
     }
@@ -54,7 +50,7 @@ impl luminol_core::Window for Window {
         &mut self,
         ctx: &egui::Context,
         open: &mut bool,
-        _update_state: &mut luminol_core::UpdateState<'_>,
+        update_state: &mut luminol_core::UpdateState<'_>,
     ) {
         // Show the window. Name it "About Luminol"
         egui::Window::new("About Luminol")
@@ -69,7 +65,7 @@ impl luminol_core::Window for Window {
 
                     ui.separator();
                     ui.label(format!("Luminol version {}", env!("CARGO_PKG_VERSION")));
-                    ui.label(format!("git-rev {}", git_version::git_version!()));
+                    ui.label(format!("git-rev {}", update_state.git_revision));
                     ui.separator();
 
                     ui.label("Luminol is a FOSS version of the RPG Maker XP editor.");

@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -22,12 +22,6 @@ export function is_worker() {
 
 export function worker() {
     return is_worker() ? self : null;
-}
-
-// A binding for this attribute was added in July 2023 but hasn't made its way into a release of
-// web-sys as of September 2023
-export function performance(worker) {
-    return worker.performance;
 }
 
 export function filesystem_supported() {
@@ -56,7 +50,12 @@ export function dir_values(dir) {
 }
 
 export async function _request_permission(handle) {
-    return (await handle.requestPermission({ mode: 'readwrite' })) === 'granted'
+    if (typeof window?.__FILE_SYSTEM_TOOLS__?.parseHandle === 'function') {
+        // If the user is using https://github.com/ichaoX/ext-file without enabling `FS_CONFIG.CLONE_ENABLED`,
+        // this is required to restore the `.requestPermission` method on a dir handle restored from IndexedDB
+        handle = window.__FILE_SYSTEM_TOOLS__.parseHandle(handle);
+    }
+    return (await handle.requestPermission({ mode: 'readwrite' })) === 'granted';
 }
 
 export function cross_origin_isolated() {

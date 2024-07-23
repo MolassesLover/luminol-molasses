@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -27,10 +27,6 @@
 pub struct EguiInspection {}
 
 impl luminol_core::Window for EguiInspection {
-    fn name(&self) -> String {
-        "Egui Inspection".to_string()
-    }
-
     fn id(&self) -> egui::Id {
         egui::Id::new("Egui Inspection")
     }
@@ -41,7 +37,7 @@ impl luminol_core::Window for EguiInspection {
         open: &mut bool,
         _update_state: &mut luminol_core::UpdateState<'_>,
     ) {
-        egui::Window::new(self.name())
+        egui::Window::new("Egui Inspection")
             .open(open)
             .show(ctx, |ui| ctx.inspection_ui(ui));
     }
@@ -52,10 +48,6 @@ impl luminol_core::Window for EguiInspection {
 pub struct EguiMemory {}
 
 impl luminol_core::Window for EguiMemory {
-    fn name(&self) -> String {
-        "Egui Memory".to_string()
-    }
-
     fn id(&self) -> egui::Id {
         egui::Id::new("Egui Memory")
     }
@@ -66,7 +58,7 @@ impl luminol_core::Window for EguiMemory {
         open: &mut bool,
         _update_state: &mut luminol_core::UpdateState<'_>,
     ) {
-        egui::Window::new(self.name())
+        egui::Window::new("Egui Memory")
             .open(open)
             .show(ctx, |ui| ctx.memory_ui(ui));
     }
@@ -76,10 +68,6 @@ impl luminol_core::Window for EguiMemory {
 pub struct FilesystemDebug {}
 
 impl luminol_core::Window for FilesystemDebug {
-    fn name(&self) -> String {
-        "Filesystem Debug".to_string()
-    }
-
     fn id(&self) -> egui::Id {
         egui::Id::new("Filesystem Debug Window")
     }
@@ -90,8 +78,94 @@ impl luminol_core::Window for FilesystemDebug {
         open: &mut bool,
         update_state: &mut luminol_core::UpdateState<'_>,
     ) {
-        egui::Window::new(self.name())
+        egui::Window::new("Filesystem Debug")
             .open(open)
             .show(ctx, |ui| update_state.filesystem.debug_ui(ui));
+    }
+}
+
+pub struct WgpuDebugInfo {
+    adapter_info: wgpu::AdapterInfo,
+    adapter_features: wgpu::Features,
+    adapter_limits: wgpu::Limits,
+    downlevel_caps: wgpu::DownlevelCapabilities,
+}
+
+impl WgpuDebugInfo {
+    pub fn new(update_state: &luminol_core::UpdateState<'_>) -> Self {
+        let adapter_info = update_state.graphics.render_state.adapter.get_info();
+        let adapter_features = update_state.graphics.render_state.adapter.features();
+        let adapter_limits = update_state.graphics.render_state.adapter.limits();
+        let downlevel_caps = update_state
+            .graphics
+            .render_state
+            .adapter
+            .get_downlevel_capabilities();
+
+        Self {
+            adapter_info,
+            adapter_features,
+            adapter_limits,
+            downlevel_caps,
+        }
+    }
+}
+
+impl luminol_core::Window for WgpuDebugInfo {
+    fn id(&self) -> egui::Id {
+        egui::Id::new("wgpu debug info window")
+    }
+
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        open: &mut bool,
+        _: &mut luminol_core::UpdateState<'_>,
+    ) {
+        egui::Window::new("WGPU Debug Info")
+            .open(open)
+            .scroll([false, true])
+            .show(ctx, |ui| {
+                if !self.downlevel_caps.is_webgpu_compliant() {
+                    ui.label(
+                        egui::RichText::new("🔥 Adapter is not WebGPU compliant")
+                            .color(egui::Color32::RED),
+                    );
+                }
+
+                ui.heading("Adapter info");
+                ui.separator();
+
+                ui.add_space(16.);
+                ui.label(format!("{:#?}", self.adapter_info));
+                ui.add_space(16.);
+
+                ui.heading("Device features");
+                ui.separator();
+
+                ui.add_space(16.);
+                for (name, _) in self.adapter_features.iter_names() {
+                    ui.label(name);
+                }
+                ui.add_space(16.);
+
+                ui.heading("Device limits");
+                ui.separator();
+
+                ui.add_space(16.);
+                ui.label(format!("{:#?}", self.adapter_limits));
+                ui.add_space(16.);
+
+                ui.heading("Downlevel capabilities");
+                ui.separator();
+
+                ui.add_space(16.);
+                ui.label(format!("{:#?}", self.downlevel_caps.shader_model));
+                ui.add_space(16.);
+
+                for (name, _) in self.downlevel_caps.flags.iter_names() {
+                    ui.label(name);
+                }
+            });
     }
 }

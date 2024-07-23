@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Lily Lyons
+// Copyright (C) 2024 Melody Madeline Lyons
 //
 // This file is part of Luminol.
 //
@@ -23,7 +23,7 @@
 // Program grant you additional permission to convey the resulting work.
 use serde::{Deserialize, Serialize};
 
-use super::{command_db, RGSSVer, RMVer};
+use super::{command_db, DataFormat, RGSSVer, RMVer};
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -40,11 +40,12 @@ pub struct Config {
 pub struct Project {
     pub project_name: String,
     pub scripts_path: String,
-    pub use_ron: bool,
+    pub data_format: DataFormat,
     pub rgss_ver: RGSSVer,
     pub editor_ver: RMVer,
     pub playtest_exe: String,
     pub prefer_rgssad: bool,
+    pub persistence_id: u64,
 }
 
 impl Default for Project {
@@ -52,11 +53,12 @@ impl Default for Project {
         Self {
             project_name: String::new(),
             scripts_path: "Scripts".to_string(),
-            use_ron: false,
+            data_format: DataFormat::Marshal,
             rgss_ver: RGSSVer::RGSS1,
             editor_ver: RMVer::XP,
             playtest_exe: "game".to_string(),
             prefer_rgssad: false,
+            persistence_id: 0,
         }
     }
 }
