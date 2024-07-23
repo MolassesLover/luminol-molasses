@@ -3,6 +3,9 @@
 /marshal/target
 /dist
 
+# Nix build result
+result
+
 #! GDB-related files
 .gdb_*
 
